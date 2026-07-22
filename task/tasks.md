@@ -16,11 +16,11 @@ Plan derivado de [devstrudeleeg.md](../devstrudeleeg.md). Marcar con `[x]` al co
 - [x] Commit F0
 
 ## F1 — Motor B seco
-- [ ] `MiniNotationParser`: subset `stack`, `s`, `note`, `slow`, `fast`, `<...>`, secuencia, `[...]`, `gain`, `room`, `cutoff` (clean-room, solo doc pública)
-- [ ] `Scheduler` sobre AVAudioEngine tocando el código semilla sin efectos
-- [ ] Validar timing/secuencia contra Strudel de referencia
-- [ ] Aviso amable si hay función fuera del subset (no crashear)
-- [ ] Commit F1
+- [x] `MiniNotationParser`: subset `stack`, `s`, `note`, `slow`, `fast`, `<...>`, secuencia, `[...]`, `gain`, `room`, `cutoff` (clean-room, solo doc pública)
+- [x] `Scheduler` sobre AVAudioEngine tocando el código semilla sin efectos
+- [x] Validar timing/secuencia contra Strudel de referencia (ValidateEvents: 11/11 OK)
+- [x] Aviso amable si hay función fuera del subset (no crashear)
+- [x] Commit F1
 
 ## F2 — Motor B efectos
 - [ ] `cutoff` → AVAudioUnitEQ low-pass

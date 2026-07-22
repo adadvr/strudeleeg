@@ -15,6 +15,10 @@ let package = Package(
             name: "DemoStrudelApp",
             targets: ["DemoStrudelApp"]
         ),
+        .executable(
+            name: "ValidateEvents",
+            targets: ["ValidateEvents"]
+        ),
     ],
     targets: [
         // Isolated native audio engine — no dependency on app code or WebView
@@ -31,6 +35,12 @@ let package = Package(
             resources: [
                 .copy("Samples")
             ]
+        ),
+        // CLI tool to validate event timing (F1 verification)
+        .executableTarget(
+            name: "ValidateEvents",
+            dependencies: ["NativeEngine"],
+            path: "Sources/ValidateEvents"
         ),
     ]
 )

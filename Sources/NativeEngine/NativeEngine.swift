@@ -15,107 +15,99 @@ public protocol AudioDemoEngineProtocol {
 }
 
 // ---------------------------------------------------------------------------
-// NativeEngine — F0 stub
-// "Hello world" audio: plays Samples/pad.wav in a loop via AVAudioEngine.
-// In F1+ the code string will be parsed; for now it is ignored and only pad
-// is played to prove the AVAudioEngine pipeline works end-to-end.
+// PlayResult — carries success or a human-readable error
+// ---------------------------------------------------------------------------
+
+public enum PlayResult {
+    case ok
+    case error(String)
+}
+
+// ---------------------------------------------------------------------------
+// NativeEngine — F1
+// Wires MiniNotationParser → Scheduler → AVAudioEngine.
+// Effects (gain/room/cutoff) are parsed and stored but not applied yet (F2).
 // ---------------------------------------------------------------------------
 
 /// Initialise with a dictionary of sample name → URL so the engine never
 /// touches Bundle.module from the app, keeping it fully isolated.
-///
-/// Example:
-/// ```swift
-/// let engine = NativeEngine(sampleURLs: [
-///     "pad":  Bundle.module.url(forResource: "pad",  withExtension: "wav", subdirectory: "Samples")!,
-///     "bell": Bundle.module.url(forResource: "bell", withExtension: "wav", subdirectory: "Samples")!,
-/// ])
-/// ```
 public final class NativeEngine: AudioDemoEngineProtocol {
 
     // MARK: - Properties
 
     private let sampleURLs: [String: URL]
-
     private let audioEngine = AVAudioEngine()
-    private let padNode    = AVAudioPlayerNode()
-    private let reverbNode = AVAudioUnitReverb()
+    private var scheduler: Scheduler?
 
-    private var padBuffer: AVAudioPCMBuffer?
     private var isPlaying = false
+
+    /// Called on the main thread with a human-readable error if parse fails.
+    public var onParseError: ((String) -> Void)?
 
     // MARK: - Init
 
-    /// - Parameter sampleURLs: Map of sample name (e.g. "pad", "bell") to their file URLs.
-    ///   The engine reads these files directly; it does NOT call Bundle.module.
     public init(sampleURLs: [String: URL]) {
         self.sampleURLs = sampleURLs
-        setupAudioGraph()
+        prepareEngine()
     }
 
     // MARK: - AudioDemoEngineProtocol
 
-    /// F0: ignores `code` and simply plays `pad.wav` in a loop.
-    /// In F1+ the code will be parsed to schedule events.
+    /// Parse `code`, then start the scheduler. Re-entrant: always stops previous playback first.
     public func play(code: String) {
-        guard !isPlaying else { return }
+        stop()
 
-        guard let padURL = sampleURLs["pad"] else {
-            print("[NativeEngine] pad sample URL not found")
+        let parser = MiniNotationParser()
+        let layers: [Layer]
+        do {
+            layers = try parser.parse(code)
+        } catch let e as ParseError {
+            let msg = e.errorDescription ?? e.localizedDescription
+            print("[NativeEngine] Parse error: \(msg)")
+            DispatchQueue.main.async { self.onParseError?(msg) }
+            return
+        } catch {
+            let msg = error.localizedDescription
+            print("[NativeEngine] Unexpected parse error: \(msg)")
+            DispatchQueue.main.async { self.onParseError?(msg) }
             return
         }
 
-        do {
-            let file = try AVAudioFile(forReading: padURL)
-            guard let buffer = AVAudioPCMBuffer(
-                pcmFormat: file.processingFormat,
-                frameCapacity: AVAudioFrameCount(file.length)
-            ) else {
-                print("[NativeEngine] Could not allocate PCM buffer")
+        if layers.isEmpty {
+            print("[NativeEngine] No layers parsed — nothing to play")
+            return
+        }
+
+        // Log parsed layers for debugging
+        for (i, layer) in layers.enumerated() {
+            print("[NativeEngine] Layer \(i): sample=\(layer.sample) slowFactor=\(layer.slowFactor) isAlternation=\(layer.isAlternation) events=\(layer.events.count) gain=\(layer.gain.map { "\($0)" } ?? "nil") room=\(layer.room.map { "\($0)" } ?? "nil") cutoff=\(layer.cutoff.map { "\($0)" } ?? "nil")")
+        }
+
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+            } catch {
+                print("[NativeEngine] Failed to start engine: \(error)")
                 return
             }
-            try file.read(into: buffer)
-            self.padBuffer = buffer
-
-            if !audioEngine.isRunning {
-                try audioEngine.start()
-            }
-
-            // Schedule loop
-            padNode.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
-            padNode.play()
-            isPlaying = true
-            print("[NativeEngine] Playing pad.wav in loop (F0 hello-world)")
-        } catch {
-            print("[NativeEngine] Error starting playback: \(error)")
         }
+
+        let sched = Scheduler(audioEngine: audioEngine, sampleURLs: sampleURLs)
+        scheduler = sched
+        sched.play(layers: layers)
+        isPlaying = true
+        print("[NativeEngine] Playing F1 (parser + scheduler)")
     }
 
     public func stop() {
-        guard isPlaying else { return }
-        padNode.stop()
+        scheduler?.stop()
+        scheduler = nil
         isPlaying = false
-        print("[NativeEngine] Stopped")
     }
 
     // MARK: - Private
 
-    private func setupAudioGraph() {
-        // Attach nodes
-        audioEngine.attach(padNode)
-        audioEngine.attach(reverbNode)
-
-        // Configure reverb (gentle room preset for meditation)
-        reverbNode.loadFactoryPreset(.mediumRoom)
-        reverbNode.wetDryMix = 40  // 40% wet — overridden in F2 by parsed room value
-
-        let mainMixer = audioEngine.mainMixerNode
-        let format = audioEngine.outputNode.inputFormat(forBus: 0)
-
-        // pad → reverb → mainMixer → output
-        audioEngine.connect(padNode,    to: reverbNode, format: nil)
-        audioEngine.connect(reverbNode, to: mainMixer,  format: format)
-
+    private func prepareEngine() {
         audioEngine.prepare()
     }
 }

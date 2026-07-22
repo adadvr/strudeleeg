@@ -107,7 +107,12 @@ struct ContentView: View {
             }
             .buttonStyle(PlayButtonStyle(color: .green))
 
-            if !vm.statusMessage.isEmpty && vm.lastPlayedSide == .right {
+            if !vm.parseError.isEmpty && vm.lastPlayedSide == .right {
+                Text(vm.parseError)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .lineLimit(3)
+            } else if !vm.statusMessage.isEmpty && vm.lastPlayedSide == .right {
                 Text(vm.statusMessage)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -186,18 +191,25 @@ enum PlaySide { case left, right, none }
 final class DemoViewModel: ObservableObject {
 
     @Published var statusMessage: String = ""
+    @Published var parseError: String = ""
     @Published var lastPlayedSide: PlaySide = .none
 
     private let nativeEngine: NativeEngineAdapter
 
     init() {
         self.nativeEngine = NativeEngineAdapter()
+        self.nativeEngine.onParseError = { [weak self] msg in
+            Task { @MainActor in
+                self?.parseError = msg
+            }
+        }
     }
 
     func playNative(code: String) {
         nativeEngine.stop()           // stop previous if playing
         lastPlayedSide = .right
-        statusMessage = "Reproduciendo pad.wav (F0 hello-world)"
+        parseError = ""
+        statusMessage = "Reproduciendo Motor B (F1)…"
         nativeEngine.play(code: code)
     }
 

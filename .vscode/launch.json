@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Debug DemoStrudelApp",
+            "target": "DemoStrudelApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug DemoStrudelApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Release DemoStrudelApp",
+            "target": "DemoStrudelApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release DemoStrudelApp"
+        }
+    ]
+}

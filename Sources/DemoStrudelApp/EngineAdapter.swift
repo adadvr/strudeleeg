@@ -10,6 +10,11 @@ final class NativeEngineAdapter: AudioDemoEngine {
 
     private let engine: NativeEngine
 
+    /// Forwarded from NativeEngine.onParseError; set by DemoViewModel.
+    var onParseError: ((String) -> Void)? {
+        didSet { engine.onParseError = onParseError }
+    }
+
     init() {
         // Resolve sample URLs from the app bundle (DemoStrudelApp_DemoStrudelApp.bundle
         // is created by SPM for the resources target).
