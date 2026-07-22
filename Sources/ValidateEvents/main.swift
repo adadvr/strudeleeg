@@ -1,11 +1,12 @@
-// ValidateEvents — F1 timing verification
-// Prints the events for the first 16 seconds of the seed code and validates
-// that pad fires at t=0 and t=8, and bell fires c4@0, e4@4, g4@8, b4@12.
+// ValidateEvents — timing verification using MiniEngine (Phase 0)
 //
-// Run with:   swift run ValidateEvents   (or execute the binary directly)
+// Parses the seed code with the new Pattern-based engine, queries events for
+// 0..16 seconds, and validates the expected timing + effects.
+//
+// Run with:  swift run ValidateEvents
 
 import Foundation
-import NativeEngine
+import MiniEngine
 
 // ---------------------------------------------------------------------------
 // Seed code (identical to ContentView)
@@ -17,192 +18,160 @@ stack(
 )
 """
 
-let CYCLE_SECONDS = 2.0   // 1 cycle = 2 s (Strudel default)
+let CYCLE_SECONDS = 2.0   // 0.5 cps → 1 cycle = 2 s
 
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
-let parser = MiniNotationParser()
-let layers: [Layer]
+let parser = CodeParser()
+let pattern: ControlPattern
 do {
-    layers = try parser.parse(seedCode)
+    pattern = try parser.parse(seedCode)
 } catch {
     print("PARSE ERROR: \(error)")
     exit(1)
 }
 
-print("Parsed \(layers.count) layer(s)\n")
-for (i, layer) in layers.enumerated() {
-    print("  Layer \(i): sample=\(layer.sample)  slowFactor=\(layer.slowFactor)  isAlternation=\(layer.isAlternation)  baseEvents=\(layer.events.count)  alts=\(layer.alternatives.count)")
-    // F2: effect chain config
-    let gainStr   = layer.gain.map   { String(format: "%.2f", $0) } ?? "—"
-    let roomStr   = layer.room.map   { String(format: "%.2f → wetDryMix=%.0f%%", $0, $0 * 100) } ?? "—"
-    let cutoffStr = layer.cutoff.map { String(format: "%.0f Hz (lowPass EQ)", $0) } ?? "—"
-    print("    Effects: gain=\(gainStr)  room=\(roomStr)  cutoff=\(cutoffStr)")
-    let chain: [String] = {
-        var c = ["player"]
-        if layer.events.contains(where: { $0.midiNote != nil }) ||
-           layer.alternatives.contains(where: { $0.contains { $0.midiNote != nil } }) {
-            c.append("varispeed")
-        }
-        if layer.cutoff != nil { c.append("EQ(lowPass)") }
-        if layer.room   != nil { c.append("reverb(mediumHall)") }
-        c.append("mainMixer")
-        return c
-    }()
-    print("    Chain:   \(chain.joined(separator: " → "))")
-    if layer.isAlternation {
-        for (ai, alt) in layer.alternatives.enumerated() {
-            for ev in alt {
-                let noteStr = ev.midiNote.map { "\($0)" } ?? "—"
-                print("    alt[\(ai)]: onset=\(ev.cycleOnset)  midi=\(noteStr)")
-            }
-        }
-    } else {
-        for ev in layer.events {
-            let noteStr = ev.midiNote.map { "\($0)" } ?? "—"
-            print("    event: onset=\(ev.cycleOnset)  midi=\(noteStr)")
-        }
-    }
-}
-print()
-
 // ---------------------------------------------------------------------------
-// Generate events for 0..16 seconds
+// Query events for 0..totalSeconds
 // ---------------------------------------------------------------------------
+let totalSeconds = 16.0
+let totalCycles  = Rational(approximating: totalSeconds / CYCLE_SECONDS)  // 8 cycles
 
+let haps = pattern.queryArc(Rational(0), totalCycles)
+print("Total haps in [0, \(totalCycles)) cycles (\(Int(totalSeconds))s): \(haps.count)\n")
+
+// Convert hap to an absolute event
 struct AbsoluteEvent {
-    let layer: Int
-    let sample: String
+    let sample:   String
     let midiNote: Int?
     let noteName: String
-    let absoluteTime: Double
-    let gain: Double?
-    let room: Double?
-    let cutoff: Double?
+    let absTime:  Double
+    let gain:     Double?
+    let room:     Double?
+    let cutoff:   Double?
 }
 
 var allEvents: [AbsoluteEvent] = []
-let totalSeconds = 16.0
 
-for (layerIndex, layer) in layers.enumerated() {
-    let cycleDuration = CYCLE_SECONDS * layer.slowFactor
-    let numCycles = Int(ceil(totalSeconds / cycleDuration)) + 1
+for hap in haps {
+    guard let sampleName = hap.value["s"]?.stringValue else { continue }
 
-    for cycleIndex in 0..<numCycles {
-        let cycleStartSec = Double(cycleIndex) * cycleDuration
-        let events = layer.eventsForCycle(cycleIndex)
-        for event in events {
-            let absTime = cycleStartSec + event.cycleOnset * cycleDuration
-            guard absTime < totalSeconds else { continue }
+    // Use part.begin as onset (cycle units)
+    let onsetCycles = hap.part.begin.toDouble
+    let absTime     = onsetCycles * CYCLE_SECONDS
 
-            let noteName: String
-            if let midi = event.midiNote {
-                noteName = midiToName(midi)
-            } else {
-                noteName = "—"
-            }
-            allEvents.append(AbsoluteEvent(
-                layer: layerIndex,
-                sample: layer.sample,
-                midiNote: event.midiNote,
-                noteName: noteName,
-                absoluteTime: absTime,
-                gain: layer.gain,
-                room: layer.room,
-                cutoff: layer.cutoff
-            ))
-        }
-    }
+    guard absTime < totalSeconds else { continue }
+
+    let midiNote  = hap.value["note"]?.doubleValue.map { Int($0) } ?? nil
+    let noteName  = midiNote.map { midiToNoteName($0) } ?? "—"
+
+    allEvents.append(AbsoluteEvent(
+        sample:   sampleName,
+        midiNote: midiNote,
+        noteName: noteName,
+        absTime:  absTime,
+        gain:     hap.value["gain"]?.doubleValue,
+        room:     hap.value["room"]?.doubleValue,
+        cutoff:   hap.value["cutoff"]?.doubleValue
+    ))
 }
 
-// Sort by time
-allEvents.sort { $0.absoluteTime < $1.absoluteTime }
+// Deduplicate by (sample, absTime, midiNote) — withControl produces one hap
+// per cycle but the scheduler only fires on the onset, so each event is unique.
+// Actually keep all events; scheduler deduplicates via time window.
+allEvents.sort { $0.absTime < $1.absTime }
 
 // ---------------------------------------------------------------------------
-// Print table (pure string interpolation — avoids %s crash on macOS)
+// Print table
 // ---------------------------------------------------------------------------
 
-func col(_ s: String, _ width: Int) -> String {
-    s.padding(toLength: max(s.count, width), withPad: " ", startingAt: 0)
+func col(_ s: String, _ w: Int) -> String {
+    s.padding(toLength: max(s.count, w), withPad: " ", startingAt: 0)
 }
 
-let header = col("t(s)", 8) + "  " + col("layer", 6) + "  " + col("sample", 6) + "  " +
-             col("note", 5) + "  " + col("gain", 6) + "  " + col("room", 6) + "  " + col("cutoff", 8)
+let header = col("t(s)", 8) + "  " + col("sample", 6) + "  " +
+             col("note", 14) + "  " + col("gain", 6) + "  " +
+             col("room", 6) + "  " + col("cutoff", 8)
 print(header)
 print(String(repeating: "-", count: header.count))
 
+// Print only the *first* event per (sample, onset, note) combination
+var printed: Set<String> = []
 for ev in allEvents {
-    let t     = String(format: "%.3f", ev.absoluteTime)
-    let midi  = ev.midiNote.map { "(\($0))" } ?? ""
-    let note  = ev.noteName + (midi.isEmpty ? "" : " \(midi)")
-    let gain  = ev.gain.map  { String(format: "%.1f", $0) } ?? "—"
-    let room  = ev.room.map  { String(format: "%.1f", $0) } ?? "—"
-    let cut   = ev.cutoff.map { String(format: "%.0f", $0) } ?? "—"
-    print(col(t, 8) + "  " + col("\(ev.layer)", 6) + "  " +
-          col(ev.sample, 6) + "  " + col(note, 14) + "  " +
-          col(gain, 6) + "  " + col(room, 6) + "  " + col(cut, 8))
+    let key = "\(ev.sample)_\(ev.absTime)_\(ev.midiNote ?? -1)"
+    guard !printed.contains(key) else { continue }
+    printed.insert(key)
+
+    let t      = String(format: "%.3f", ev.absTime)
+    let note   = ev.noteName + (ev.midiNote.map { " (\($0))" } ?? "")
+    let gain   = ev.gain.map  { String(format: "%.2f", $0) } ?? "—"
+    let room   = ev.room.map  { String(format: "%.2f", $0) } ?? "—"
+    let cut    = ev.cutoff.map { String(format: "%.0f", $0) } ?? "—"
+    print(col(t, 8) + "  " + col(ev.sample, 6) + "  " +
+          col(note, 14) + "  " + col(gain, 6) + "  " + col(room, 6) + "  " + col(cut, 8))
 }
 
 // ---------------------------------------------------------------------------
-// Validate expected pattern
+// Validation
 // ---------------------------------------------------------------------------
 
 print("\n--- Validation ---")
 var ok = true
 
-// Pad: slow(4) → cycleDuration = 8s. Fires at 0, 8s in first 16s.
-let padEvents = allEvents.filter { $0.sample == "pad" }
-let padTimes  = padEvents.map { $0.absoluteTime }
-for expected in [0.0, 8.0] {
-    let found = padTimes.contains { abs($0 - expected) < 0.001 }
-    print("pad @ t=\(expected)s : \(found ? "OK" : "FAIL")")
+// Helper: find a unique event at approximate time t for a given sample
+func hasEvent(sample: String, approxTime t: Double, noteName: String? = nil) -> Bool {
+    printed.contains("\(sample)_\(String(format: "%.3f", t))_\(-1)") ||
+    allEvents.contains {
+        $0.sample == sample &&
+        abs($0.absTime - t) < 0.001 &&
+        (noteName == nil || $0.noteName == noteName)
+    }
+}
+
+// Pad: slow(4) → period = 8s. Fires at t=0 and t=8 in first 16s.
+for t in [0.0, 8.0] {
+    let found = allEvents.contains { $0.sample == "pad" && abs($0.absTime - t) < 0.001 }
+    print("pad @ t=\(t)s : \(found ? "OK" : "FAIL")")
     if !found { ok = false }
 }
 
-// Bell: slow(2) → cycleDuration = 4s, alternation <c4 e4 g4 b4>
+// Bell: slow(2) → period=4s, alternation <c4 e4 g4 b4>
 // cycle 0 → c4 @ t=0, cycle 1 → e4 @ t=4, cycle 2 → g4 @ t=8, cycle 3 → b4 @ t=12
-let bellEvents = allEvents.filter { $0.sample == "bell" }
-let expectedBell: [(t: Double, note: String)] = [
+let bellCases: [(t: Double, note: String)] = [
     (0.0, "c4"), (4.0, "e4"), (8.0, "g4"), (12.0, "b4")
 ]
-for exp in expectedBell {
-    let found = bellEvents.contains { abs($0.absoluteTime - exp.t) < 0.001 && $0.noteName == exp.note }
+for exp in bellCases {
+    let found = allEvents.contains {
+        $0.sample == "bell" &&
+        abs($0.absTime - exp.t) < 0.001 &&
+        $0.noteName == exp.note
+    }
     print("bell \(exp.note) @ t=\(exp.t)s : \(found ? "OK" : "FAIL")")
     if !found { ok = false }
 }
 
-// Validate effects are parsed correctly on layer 0 (pad)
-if let padLayer = layers.first(where: { $0.sample == "pad" }) {
-    let gainOK = padLayer.gain   == 0.5;  print("pad  gain=0.5 : \(gainOK ? "OK" : "FAIL")"); if !gainOK { ok = false }
-    let roomOK = padLayer.room   == 0.6;  print("pad  room=0.6 : \(roomOK ? "OK" : "FAIL")"); if !roomOK { ok = false }
-    // F2: pad has no cutoff → EQ should be absent (nil)
-    let noCutoffOK = padLayer.cutoff == nil
-    print("pad  cutoff=nil (no EQ) : \(noCutoffOK ? "OK" : "FAIL")"); if !noCutoffOK { ok = false }
-    // F2: wetDryMix for pad room=0.6 → 60
-    let wetOK = padLayer.room.map { abs($0 * 100 - 60) < 0.001 } ?? false
-    print("pad  room→wetDryMix=60 : \(wetOK ? "OK" : "FAIL")"); if !wetOK { ok = false }
+// Effect validation: find a pad event and check its effects
+if let padEv = allEvents.first(where: { $0.sample == "pad" }) {
+    let gainOK = padEv.gain.map { abs($0 - 0.5) < 0.001 } ?? false
+    let roomOK = padEv.room.map { abs($0 - 0.6) < 0.001 } ?? false
+    let noCutoffOK = padEv.cutoff == nil
+    print("pad  gain=0.5 : \(gainOK ? "OK" : "FAIL")"); if !gainOK { ok = false }
+    print("pad  room=0.6 : \(roomOK ? "OK" : "FAIL")"); if !roomOK { ok = false }
+    print("pad  cutoff=nil : \(noCutoffOK ? "OK" : "FAIL")"); if !noCutoffOK { ok = false }
 }
-// Bell layer effects
-if let bellLayer = layers.first(where: { $0.sample == "bell" }) {
-    let gainOK   = bellLayer.gain   == 0.7;  print("bell gain=0.7    : \(gainOK   ? "OK" : "FAIL")"); if !gainOK   { ok = false }
-    let roomOK   = bellLayer.room   == 0.4;  print("bell room=0.4    : \(roomOK   ? "OK" : "FAIL")"); if !roomOK   { ok = false }
-    let cutoffOK = bellLayer.cutoff == 1500;  print("bell cutoff=1500 : \(cutoffOK ? "OK" : "FAIL")"); if !cutoffOK { ok = false }
-    // F2: wetDryMix for bell room=0.4 → 40
-    let wetOK = bellLayer.room.map { abs($0 * 100 - 40) < 0.001 } ?? false
-    print("bell room→wetDryMix=40  : \(wetOK ? "OK" : "FAIL")"); if !wetOK { ok = false }
+
+if let bellEv = allEvents.first(where: { $0.sample == "bell" }) {
+    let gainOK   = bellEv.gain.map   { abs($0 - 0.7) < 0.001 } ?? false
+    let roomOK   = bellEv.room.map   { abs($0 - 0.4) < 0.001 } ?? false
+    let cutoffOK = bellEv.cutoff.map { abs($0 - 1500) < 0.1  } ?? false
+    print("bell gain=0.7 : \(gainOK   ? "OK" : "FAIL")"); if !gainOK   { ok = false }
+    print("bell room=0.4 : \(roomOK   ? "OK" : "FAIL")"); if !roomOK   { ok = false }
+    print("bell cutoff=1500 : \(cutoffOK ? "OK" : "FAIL")"); if !cutoffOK { ok = false }
 }
 
 print("\nResult: \(ok ? "ALL PASS ✓" : "SOME CHECKS FAILED ✗")")
 exit(ok ? 0 : 1)
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-func midiToName(_ midi: Int) -> String {
-    let names = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"]
-    let octave = (midi / 12) - 1
-    let name = names[midi % 12]
-    return "\(name)\(octave)"
-}
+// midiToNoteName is a public free function in MiniEngine module (MiniNotationCore.swift)
+// — no local wrapper needed; imported directly via `import MiniEngine`.

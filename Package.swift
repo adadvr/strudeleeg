@@ -7,10 +7,6 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .library(
-            name: "NativeEngine",
-            targets: ["NativeEngine"]
-        ),
         .executable(
             name: "DemoStrudelApp",
             targets: ["DemoStrudelApp"]
@@ -20,27 +16,28 @@ let package = Package(
             targets: ["ValidateEvents"]
         ),
     ],
+    dependencies: [
+        .package(path: "MiniEngine"),
+    ],
     targets: [
-        // Isolated native audio engine — no dependency on app code or WebView
-        .target(
-            name: "NativeEngine",
-            dependencies: [],
-            path: "Sources/NativeEngine"
-        ),
-        // SwiftUI executable app
+        // SwiftUI executable app — depends on MiniEngine
         .executableTarget(
             name: "DemoStrudelApp",
-            dependencies: ["NativeEngine"],
+            dependencies: [
+                .product(name: "MiniEngine", package: "MiniEngine"),
+            ],
             path: "Sources/DemoStrudelApp",
             resources: [
                 .copy("Samples"),
                 .copy("StrudelWeb")
             ]
         ),
-        // CLI tool to validate event timing (F1 verification)
+        // CLI tool — validates event timing using the new MiniEngine core
         .executableTarget(
             name: "ValidateEvents",
-            dependencies: ["NativeEngine"],
+            dependencies: [
+                .product(name: "MiniEngine", package: "MiniEngine"),
+            ],
             path: "Sources/ValidateEvents"
         ),
         // Headless probe to diagnose the Strudel WebView engine

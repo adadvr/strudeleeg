@@ -1,49 +1,47 @@
 import Foundation
-import NativeEngine
+import MiniEngine
 
 // ---------------------------------------------------------------------------
-// EngineAdapter — bridges NativeEngine.AudioDemoEngineProtocol to the app's
-// AudioDemoEngine protocol so the UI stays decoupled from the engine target.
+// EngineAdapter — bridges MiniEngine to the app's AudioDemoEngine protocol.
+// MiniEngine is Bundle-independent; we resolve sample URLs here from the
+// app bundle and pass them to MiniEngine at init time.
 // ---------------------------------------------------------------------------
 
 final class NativeEngineAdapter: AudioDemoEngine {
 
-    private let engine: NativeEngine
+    private let engine: MiniEngine
 
-    /// Forwarded from NativeEngine.onParseError; set by DemoViewModel.
+    /// Forwarded from MiniEngine.onParseError; set by DemoViewModel.
     var onParseError: ((String) -> Void)? {
         didSet { engine.onParseError = onParseError }
     }
 
     init() {
-        // Resolve sample URLs from the app bundle (DemoStrudelApp_DemoStrudelApp.bundle
-        // is created by SPM for the resources target).
-        // We pass the URLs to NativeEngine so it stays Bundle-independent.
         let bundle = Bundle.module
 
         var urls: [String: URL] = [:]
 
-        if let padURL = bundle.url(
+        if let url = bundle.url(
             forResource: "pad",
             withExtension: "wav",
             subdirectory: "Samples"
         ) {
-            urls["pad"] = padURL
+            urls["pad"] = url
         } else {
             print("[EngineAdapter] Warning: pad.wav not found in bundle")
         }
 
-        if let bellURL = bundle.url(
+        if let url = bundle.url(
             forResource: "bell",
             withExtension: "wav",
             subdirectory: "Samples"
         ) {
-            urls["bell"] = bellURL
+            urls["bell"] = url
         } else {
             print("[EngineAdapter] Warning: bell.wav not found in bundle")
         }
 
-        self.engine = NativeEngine(sampleURLs: urls)
+        self.engine = MiniEngine(sampleURLs: urls)
     }
 
     func play(code: String) {
