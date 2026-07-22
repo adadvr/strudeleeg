@@ -37,9 +37,16 @@ Plan derivado de [devstrudeleeg.md](../devstrudeleeg.md). Marcar con `[x]` al co
 - [x] Commit F3
 
 ## F4 — UI + empaque
-- [ ] UI final: labels, Play por lado, Stop compartido, mismo código semilla en ambos editores
-- [ ] Build Release → `DemoStrudel.app` autocontenido (samples + Strudel dentro)
-- [ ] Verificar firma/permisos (cert "moonshot" según Adad) o instrucciones Gatekeeper
-- [ ] Empaquetar `.dmg`
-- [ ] `README.md` para el jefe (cómo abrir, qué compara, nota de expectativas)
-- [ ] Commit F4 + push final
+- [x] UI final: labels, Play por lado, Stop compartido, mismo código semilla en ambos editores
+- [x] Build Release → `DemoStrudel.app` autocontenido (samples + Strudel dentro)
+- [x] Verificar firma: "Developer ID Application: Moonshot.la LLC (963B3Q33V9)", hardened runtime + allow-jit; sin notarizar (clic derecho → Abrir)
+- [x] Empaquetar `.dmg` (dist/DemoStrudel.dmg, 2.4 MB)
+- [x] `README.md` para el jefe (cómo abrir, qué compara, nota de expectativas)
+- [x] Commit F4 + push final
+
+## Pendiente de verificación manual (Adad)
+- [ ] Abrir la app y dar Play en ambos lados: confirmar que el lado Strudel suena (autoplay del AudioContext en WKWebView — si no arranca a la primera, dar Play dos veces)
+- [ ] Piso de aceptación de oído: código semilla suena igual en ambos lados
+- [ ] Probar el .dmg en otra Mac offline
+- [ ] (Opcional) Notarizar con credenciales de App Store Connect para evitar el paso de Gatekeeper
+- [ ] Borrar este archivo cuando todo esté verificado

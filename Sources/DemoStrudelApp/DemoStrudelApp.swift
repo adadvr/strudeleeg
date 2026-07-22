@@ -3,7 +3,7 @@ import SwiftUI
 @main
 struct DemoStrudelApp: App {
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("DemoStrudel — A/B Strudel vs Mini Engine") {
             ContentView()
         }
         .windowStyle(.titleBar)

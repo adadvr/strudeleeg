@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build_app.sh — Build DemoStrudel.app and package it in dist/
 # Usage: bash scripts/build_app.sh  (from repo root)
-# Produces: dist/DemoStrudel.app  (ad-hoc signed, ready for Gatekeeper bypass)
+# Produces: dist/DemoStrudel.app  (signed with Developer ID or ad-hoc fallback)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,6 +18,10 @@ APP_DIR="dist/${APP_NAME}.app"
 CONTENTS="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS}/MacOS"
 RESOURCES_DIR="${CONTENTS}/Resources"
+ENTITLEMENTS="${REPO_ROOT}/scripts/entitlements.plist"
+
+# Developer ID for real signing (override with CODESIGN_IDENTITY env var or set to "" to force ad-hoc)
+DEVELOPER_ID="Developer ID Application: Moonshot.la LLC (963B3Q33V9)"
 
 # SPM names the resource bundle <PackageName>_<TargetName>.bundle
 SPM_BUNDLE="${BUILD_DIR}/DemoStrudel_DemoStrudelApp.bundle"
@@ -74,7 +78,7 @@ cat > "${CONTENTS}/Info.plist" <<PLIST
 PLIST
 
 # ---------------------------------------------------------------------------
-echo "==> 5. Copying SPM resource bundle (contains Samples/)"
+echo "==> 5. Copying SPM resource bundle (contains Samples/ + StrudelWeb/)"
 # ---------------------------------------------------------------------------
 if [ -d "$SPM_BUNDLE" ]; then
     BUNDLE_DEST="${RESOURCES_DIR}/$(basename "$SPM_BUNDLE")"
@@ -87,20 +91,74 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "==> 6. Ad-hoc code signing"
+echo "==> 6. Code signing"
 # ---------------------------------------------------------------------------
-codesign --force --deep -s - "$APP_DIR"
-echo "    Signed (ad-hoc): ${APP_DIR}"
+
+# Allow override via environment variable
+SIGN_ID="${CODESIGN_IDENTITY:-}"
+
+if [ -z "$SIGN_ID" ]; then
+    # Auto-detect: check if Developer ID is available in keychain
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "963B3Q33V9"; then
+        SIGN_ID="$DEVELOPER_ID"
+    else
+        SIGN_ID="-"  # ad-hoc fallback
+    fi
+fi
+
+if [ "$SIGN_ID" = "-" ]; then
+    echo "    Using ad-hoc signing (no Developer ID found)"
+    codesign --force --deep -s - "$APP_DIR"
+    echo "    Signed (ad-hoc): ${APP_DIR}"
+    SIGNED_TYPE="ad-hoc"
+else
+    echo "    Using Developer ID: ${SIGN_ID}"
+    # Hardened runtime required for Developer ID distribution.
+    # WKWebView's JavaScript engine requires the JIT entitlement under hardened runtime.
+    codesign \
+        --force \
+        --options runtime \
+        --timestamp \
+        --entitlements "$ENTITLEMENTS" \
+        -s "$SIGN_ID" \
+        --deep \
+        "$APP_DIR"
+    echo "    Signed (Developer ID + hardened runtime + JIT): ${APP_DIR}"
+    SIGNED_TYPE="Developer ID"
+fi
 
 # ---------------------------------------------------------------------------
-echo "==> 7. Summary"
+echo "==> 7. Verifying signature"
 # ---------------------------------------------------------------------------
 echo ""
-echo "    App bundle : ${APP_DIR}"
-echo "    App size   : $(du -sh "$APP_DIR" | cut -f1)"
-echo "    Binary     : $(ls -lh "${MACOS_DIR}/${BINARY_NAME}" | awk '{print $5}')"
+echo "    --- codesign --verify --deep --strict ---"
+if codesign --verify --deep --strict --verbose=2 "$APP_DIR" 2>&1; then
+    echo "    codesign verify: OK"
+else
+    echo "    WARNING: codesign verify returned non-zero"
+fi
+
+echo ""
+echo "    --- spctl --assess ---"
+if spctl --assess --type execute --verbose "$APP_DIR" 2>&1; then
+    echo "    spctl assess: OK (Gatekeeper would accept)"
+else
+    echo "    NOTE: spctl assess failed — expected without notarization."
+    echo "          First open: right-click → Open (Gatekeeper bypass)."
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "==> 8. Summary"
+# ---------------------------------------------------------------------------
+echo ""
+echo "    App bundle  : ${APP_DIR}"
+echo "    App size    : $(du -sh "$APP_DIR" | cut -f1)"
+echo "    Binary      : $(ls -lh "${MACOS_DIR}/${BINARY_NAME}" | awk '{print $5}')"
+echo "    Signed with : ${SIGNED_TYPE}"
 echo ""
 echo "==> Done."
 echo ""
-echo "    To open on this Mac : open '${APP_DIR}'"
 echo "    To share (Gatekeeper): recipient right-clicks → Open on first launch."
+echo "    Note: without notarization Gatekeeper shows a warning — that is expected."
+echo "    Run scripts/make_dmg.sh to create dist/DemoStrudel.dmg"

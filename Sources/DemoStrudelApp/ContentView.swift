@@ -1,7 +1,7 @@
 import SwiftUI
 
 // ---------------------------------------------------------------------------
-// Seed code — identical in both editors
+// Seed code — identical in both editors (from devstrudeleeg.md brief)
 // ---------------------------------------------------------------------------
 private let seedCode = """
 stack(
@@ -64,7 +64,8 @@ struct ContentView: View {
                 title: "Strudel",
                 subtitle: "WebView · WebAudio",
                 systemImage: "globe",
-                color: .blue
+                color: .blue,
+                isPlaying: vm.lastPlayedSide == .left
             )
 
             codeEditor(text: $leftCode)
@@ -72,9 +73,9 @@ struct ContentView: View {
             Button {
                 vm.playStrudel(code: leftCode)
             } label: {
-                playButtonLabel()
+                playButtonLabel(isActive: vm.lastPlayedSide == .left)
             }
-            .buttonStyle(PlayButtonStyle(color: .blue))
+            .buttonStyle(PlayButtonStyle(color: .blue, isActive: vm.lastPlayedSide == .left))
 
             if !vm.strudelError.isEmpty && vm.lastPlayedSide == .left {
                 Text(vm.strudelError)
@@ -99,7 +100,8 @@ struct ContentView: View {
                 title: "Mini Engine",
                 subtitle: "Swift · AVAudioEngine",
                 systemImage: "waveform",
-                color: .green
+                color: .green,
+                isPlaying: vm.lastPlayedSide == .right
             )
 
             codeEditor(text: $rightCode)
@@ -107,9 +109,9 @@ struct ContentView: View {
             Button {
                 vm.playNative(code: rightCode)
             } label: {
-                playButtonLabel()
+                playButtonLabel(isActive: vm.lastPlayedSide == .right)
             }
-            .buttonStyle(PlayButtonStyle(color: .green))
+            .buttonStyle(PlayButtonStyle(color: .green, isActive: vm.lastPlayedSide == .right))
 
             if !vm.parseError.isEmpty && vm.lastPlayedSide == .right {
                 Text(vm.parseError)
@@ -133,7 +135,8 @@ struct ContentView: View {
         title: String,
         subtitle: String,
         systemImage: String,
-        color: Color
+        color: Color,
+        isPlaying: Bool
     ) -> some View {
         HStack(spacing: 6) {
             Image(systemName: systemImage)
@@ -145,6 +148,19 @@ struct ContentView: View {
                 Text(subtitle)
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+            if isPlaying {
+                Spacer()
+                // Active indicator dot
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 8, height: 8)
+                    Text("Sonando")
+                        .font(.caption2)
+                        .foregroundColor(color)
+                        .fontWeight(.medium)
+                }
             }
         }
         .padding(.bottom, 4)
@@ -162,17 +178,18 @@ struct ContentView: View {
             .frame(minHeight: 200)
     }
 
-    private func playButtonLabel() -> some View {
-        Label("Play", systemImage: "play.fill")
+    private func playButtonLabel(isActive: Bool) -> some View {
+        Label(isActive ? "Reproduciendo..." : "Play", systemImage: "play.fill")
             .font(.system(size: 15, weight: .semibold))
     }
 }
 
 // ---------------------------------------------------------------------------
-// PlayButtonStyle
+// PlayButtonStyle — brighter when this side is actively playing
 // ---------------------------------------------------------------------------
 struct PlayButtonStyle: ButtonStyle {
     let color: Color
+    let isActive: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -180,9 +197,17 @@ struct PlayButtonStyle: ButtonStyle {
             .padding(.horizontal, 28)
             .padding(.vertical, 9)
             .background(
-                color.opacity(configuration.isPressed ? 0.65 : 0.85)
+                color.opacity(
+                    isActive
+                        ? (configuration.isPressed ? 0.95 : 1.0)   // fully saturated when playing
+                        : (configuration.isPressed ? 0.55 : 0.75)  // dimmed when idle
+                )
             )
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isActive ? color : Color.clear, lineWidth: 2)
+            )
     }
 }
 
@@ -252,6 +277,7 @@ final class DemoViewModel: ObservableObject {
         strudelEngine.stop()
         statusMessage = ""
         strudelError = ""
+        parseError = ""
         lastPlayedSide = .none
     }
 }
