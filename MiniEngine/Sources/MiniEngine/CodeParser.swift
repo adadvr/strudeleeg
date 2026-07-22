@@ -130,7 +130,7 @@ public struct CodeParser {
     // MARK: - Layer expression parser
 
     private let knownMethods: Set<String> = [
-        "s", "note", "n", "scale",
+        "s", "sound", "note", "n", "scale",
         "slow", "fast",
         "gain", "room", "cutoff",
         "pan",
@@ -139,14 +139,16 @@ public struct CodeParser {
         "stack",
         // Fase 2 / Tier 3
         "rev", "ply", "every", "sometimes", "often", "rarely",
-        "off", "jux", "struct"
+        "off", "jux", "struct",
+        // Fase 3: synths
+        "attack", "decay", "sustain", "release",
+        "lpf", "hpf", "resonance",
+        "speed"
     ]
 
     private let friendlyUnknown: Set<String> = [
         "shape", "distort", "chorus", "phaser",
-        "chop", "striate", "crush", "vowel",
-        "speed", "attack", "decay", "sustain", "release",
-        "lpf", "hpf", "resonance"
+        "chop", "striate", "crush", "vowel"
     ]
 
     private func parseLayerExpr(_ expr: String) throws -> ControlPattern {
@@ -166,8 +168,8 @@ public struct CodeParser {
         // ── Determine the base pattern ──────────────────────────────────────
         var base: ControlPattern?
 
-        // s("...") as standalone or in chain
-        if let sToken = chain.first(where: { $0.name == "s" }), let sArg = sToken.arg {
+        // s("...") or sound("...") as standalone or in chain (sound is alias of s in Strudel)
+        if let sToken = chain.first(where: { $0.name == "s" || $0.name == "sound" }), let sArg = sToken.arg {
             base = s(unquote(sArg))
         }
 
@@ -262,6 +264,65 @@ public struct CodeParser {
                         let rot = nums.count >= 3 ? nums[2] : 0
                         pattern = pattern.euclid(nums[0], nums[1], rot)
                     }
+                }
+
+            // ── Fase 3: ADSR ─────────────────────────────────────────────────
+            case "attack":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.attack(v) }
+                    else                 { pattern = pattern.attack(unquote(t)) }
+                }
+
+            case "decay":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.decay(v) }
+                    else                 { pattern = pattern.decay(unquote(t)) }
+                }
+
+            case "sustain":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.sustain(v) }
+                    else                 { pattern = pattern.sustain(unquote(t)) }
+                }
+
+            case "release":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.release(v) }
+                    else                 { pattern = pattern.release(unquote(t)) }
+                }
+
+            // ── Fase 3: Filters ───────────────────────────────────────────────
+            case "lpf":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.lpf(v) }
+                    else                 { pattern = pattern.lpf(unquote(t)) }
+                }
+
+            case "hpf":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.hpf(v) }
+                    else                 { pattern = pattern.hpf(unquote(t)) }
+                }
+
+            case "resonance":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.resonance(v) }
+                    else                 { pattern = pattern.resonance(unquote(t)) }
+                }
+
+            // ── Fase 3: speed ─────────────────────────────────────────────────
+            case "speed":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.speed(v) }
+                    else                 { pattern = pattern.speed(unquote(t)) }
                 }
 
             case "scale":

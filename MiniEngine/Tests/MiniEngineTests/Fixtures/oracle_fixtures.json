@@ -1141,6 +1141,161 @@
     ]
   },
   {
+    "pattern": "s(\"sawtooth\")",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "sawtooth"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "note(\"c3 e3\").s(\"sawtooth\")",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "value": {
+          "note": 48,
+          "s": "sawtooth"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "value": {
+          "note": 52,
+          "s": "sawtooth"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"sawtooth\").attack(0.1).decay(0.2).sustain(0.7).release(0.3)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "sawtooth",
+          "attack": 0.1,
+          "decay": 0.2,
+          "sustain": 0.7,
+          "release": 0.3
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"sawtooth\").lpf(800).resonance(5)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "sawtooth",
+          "lpf": 800,
+          "resonance": 5
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"sawtooth\").hpf(200)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "sawtooth",
+          "hpf": 200
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad\").speed(2)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad",
+          "speed": 2
+        }
+      }
+    ]
+  },
+  {
     "pattern": "s(\"pad bell\").rev",
     "span": [
       0,

@@ -38,10 +38,15 @@ Living document: function → status → equivalence notes.
 | `off(t, f)` | ✅ nativo (Fase 2) | Stacks original + f(copy) shifted RIGHT by t cycles. `off(t,f) = stack(self, f(self).rotR(t))`. Oracle confirmed: pan=0, copy's whole at t offset |
 | `jux(f)` | ✅ nativo (Fase 2) | Original at pan=0 (left), f(copy) at pan=1 (right). Oracle confirmed pan values are exactly 0 and 1 |
 | `struct("...")` | ✅ nativo (Fase 2) | Boolean gate: fires events at positions where mask is true. Supports `t`/`true` and `~`/`f`/`false`. Oracle verified |
-| `sound(...)` (synths) | ❌ no | Oscillator synths (Fase 3) |
-| `attack`/`decay`/`sustain`/`release` | ❌ no | ADSR envelope (Fase 3) |
-| `lpf`/`hpf` | ❌ no | High-pass filter (Fase 3) |
-| `speed(x)` | ⚠️ parcial | Pitch via varispeed is done via `note()`. Explicit speed control not exposed |
+| `sound(...)` / `s("sawtooth"\|"square"\|"sine"\|"triangle")` | ✅ nativo (Fase 3) | Oscillator synths. `sound` is alias of `s`. Synth events detected via `"synth"` field in control map. AVAudioSourceNode with voice pool (8 voices). polyBLEP band-limited saw/square; triangle via leaky integrator; sine trivial. |
+| `attack(s)` | ✅ nativo (Fase 3) | ADSR attack in seconds. Default: 0.001s (Strudel docs). Patroneable |
+| `decay(s)` | ✅ nativo (Fase 3) | ADSR decay in seconds. Default: 0.05s. Patroneable |
+| `sustain(0..1)` | ✅ nativo (Fase 3) | ADSR sustain level 0..1. Default: 0.6. Patroneable |
+| `release(s)` | ✅ nativo (Fase 3) | ADSR release in seconds. Default: 0.1s (Strudel docs). Patroneable |
+| `lpf(hz)` | ✅ nativo (Fase 3) | Low-pass filter frequency (Hz). Alias for `cutoff` on synth chain. AVAudioUnitEQ band[0] lowPass. Patroneable |
+| `hpf(hz)` | ✅ nativo (Fase 3) | High-pass filter frequency (Hz). AVAudioUnitEQ band[1] highPass. Patroneable |
+| `resonance(q)` | ✅ nativo (Fase 3) | Filter Q (0..50 per Strudel docs). Mapped to AVAudioUnitEQ bandwidth in octaves: `bandwidth = clamp(2.0/max(0.01,Q), 0.05, 5.0)`. Applies to both lpf and hpf bands. See resonance mapping note below |
+| `speed(x)` | ✅ nativo (Fase 3) | Sample playback speed (1=normal, 2=double speed +1 octave, 0.5=half). Multiplied with note-based varispeed rate. Negative speed: not supported (documented). For synths: speed() applies to pattern level only (frequency computed from MIDI directly). Patroneable |
 | `shape` / `distort` | ❌ no | Saturation (Fase 4) |
 | `chop` / `striate` | ❌ no | Granular (Fase 4) |
 | `crush` | ❌ no | Bitcrusher (Fase 4) |
@@ -66,6 +71,12 @@ El MiniEngine implementa un PRNG puro (xorshift64 + splitmix64) sembrado por `(c
 | `delayfeedback` | 0.5 (50%) | Used when `.delay()` called without explicit delayfeedback |
 | `pan` | 0 (center) | No pan node applied unless `.pan()` called |
 | Scale base octave | C3 = MIDI 48 | `n(0).scale("C:minor")` = 48 (verified with Strudel oracle) |
+| `attack` | 0.001s | Per Strudel public docs (strudel.cc/learn/effects) |
+| `decay` | 0.05s | Per Strudel public docs |
+| `sustain` | 0.6 | Per Strudel public docs (0..1) |
+| `release` | 0.1s | Per Strudel public docs |
+| Synth default note | MIDI 48 (C3) | When no `note()` provided: C3 = 130.81 Hz. Same root as scale system. |
+| `speed` | 1.0 | No speed change. Applied multiplicatively with note-based varispeed rate |
 
 ## Scale reference
 
@@ -91,3 +102,55 @@ AVAudioPlayerNode → AVAudioUnitVarispeed → AVAudioUnitEQ (lowpass)
 
 `delay` node is always in chain but wet=0 (dry) unless `.delay()` called.
 `pan` node always in chain at center (0) unless `.pan()` called.
+
+## Audio chain (per synth layer — Fase 3)
+
+```
+AVAudioSourceNode (voice pool, 8 voices)
+  → AVAudioUnitEQ (band[0]=lowPass lpf, band[1]=highPass hpf)
+  → AVAudioUnitReverb (room)
+  → AVAudioUnitDelay (delay)
+  → AVAudioMixerNode (pan)
+  → mainMixer
+```
+
+- Polyphony: 8-voice pool per synth type. Voice steal: LRU (oldest birth).
+- Both EQ bands are bypassed by default; activated when lpf/hpf called.
+- ADSR envelope is computed per-voice in the render block (no Apple AU needed for envelope).
+
+## Resonance mapping note (Fase 3)
+
+`resonance` in Strudel is a filter Q parameter (range 0..50 per public docs).
+AVAudioUnitEQ uses bandwidth in octaves (not Q directly).
+
+Mapping used: `bandwidth = clamp(2.0 / max(0.01, Q), 0.05, 5.0)`
+
+| Q | bandwidth (octaves) | Character |
+|---|---|---|
+| 0 | 5.0 | Wide, no resonance |
+| 1 | 2.0 | Gentle |
+| 5 | 0.4 | Moderate resonance |
+| 10 | 0.2 | Strong |
+| 50 | 0.05 | Very sharp (minimum bandwidth) |
+
+This is a practical approximation; exact Q-to-bandwidth conversion depends on AVAudioUnitEQ's internal implementation (Apple private). Documented compromise.
+
+## Synth oscillators (Fase 3)
+
+All oscillators are band-limited using polyBLEP corrections (standard public-domain DSP technique).
+
+| Waveform | Method | Note |
+|---|---|---|
+| `sine` | sin(2π·phase) | Trivial, alias-free |
+| `sawtooth` | naive saw + polyBLEP at phase=0 | Suppresses aliasing at discontinuity |
+| `square` | naive square + polyBLEP at 0 and 0.5 | Suppresses aliasing at both transitions |
+| `triangle` | leaky integrator of polyBLEP square (leak=0.999) | Scaled by 4×dt; DC stable |
+
+## What is NOT supported (Fase 3)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Negative `speed()` (reverse) | Not supported | Documented. `scheduleSegment` reverse is complex to implement correctly for arbitrary buffers. Document for Fase 4 if needed. |
+| `speed()` affecting synth frequency | Not applicable | Synth frequency is computed from MIDI note; speed() is pattern-level only for synths |
+| Per-event room/cutoff/lpf/hpf/resonance | Per-chain compromise | Same as Fase 1. Node-global parameters updated at dispatch time — events alternating filter values in the same layer share the last-set value |
+| Offline filter audio test | Not tested | AVAudioUnitEQ requires a running engine. Parameter mapping is unit-tested. Actual DSP filter roll-off trusted to Apple |

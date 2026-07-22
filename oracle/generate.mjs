@@ -302,6 +302,77 @@ const CASES = [
     },
   },
 
+  // ── Fase 3: Synths — control map oracle ────────────────────────────────────
+  // These verify the control-map structure emitted by the pattern layer.
+  // DSP (oscillator, ADSR, filter) is tested in Swift unit tests, not oracle.
+
+  {
+    // s("sawtooth") → should have s="sawtooth" and synth="sawtooth"
+    label: 's("sawtooth")',
+    spanCycles: 1,
+    build() {
+      // Oracle just verifies the s field — synth field is added by Swift layer.
+      // We check s="sawtooth" is present at the right time position.
+      return pure({ s: 'sawtooth' });
+    },
+  },
+
+  {
+    // note("c3 e3").s("sawtooth") → 2 events with note + s fields
+    label: 'note("c3 e3").s("sawtooth")',
+    spanCycles: 1,
+    build() {
+      // c3=48, e3=52 in Strudel's MIDI scheme (C3=48)
+      const notePat = fastcat(pure({ note: 48 }), pure({ note: 52 }));
+      return notePat.set(pure({ s: 'sawtooth' }));
+    },
+  },
+
+  {
+    // s("sawtooth").attack(0.1).decay(0.2).sustain(0.7).release(0.3)
+    // → 1 event with ADSR fields
+    label: 's("sawtooth").attack(0.1).decay(0.2).sustain(0.7).release(0.3)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'sawtooth' })
+        .set(pure({ attack: 0.1 }))
+        .set(pure({ decay: 0.2 }))
+        .set(pure({ sustain: 0.7 }))
+        .set(pure({ release: 0.3 }));
+    },
+  },
+
+  {
+    // s("sawtooth").lpf(800).resonance(5)
+    label: 's("sawtooth").lpf(800).resonance(5)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'sawtooth' })
+        .set(pure({ lpf: 800 }))
+        .set(pure({ resonance: 5 }));
+    },
+  },
+
+  {
+    // s("sawtooth").hpf(200)
+    label: 's("sawtooth").hpf(200)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'sawtooth' })
+        .set(pure({ hpf: 200 }));
+    },
+  },
+
+  {
+    // s("pad").speed(2) — speed on sample
+    label: 's("pad").speed(2)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'pad' })
+        .set(pure({ speed: 2 }));
+    },
+  },
+
   // ── Fase 2 / Tier 3: Pattern algebra ────────────────────────────────────────
 
   // rev — reverses the pattern within each cycle

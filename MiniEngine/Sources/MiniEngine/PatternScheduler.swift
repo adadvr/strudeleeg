@@ -3,26 +3,31 @@
 // each Hap to AVAudioEngine.
 //
 // Tempo: 0.5 cps → 1 cycle = 2 seconds (Strudel default).
-//         setcps arrives in Phase 1.
 //
 // Architecture:
-//   • One LayerGroup per distinct "s" value encountered in the pattern.
-//     Each LayerGroup has a dedicated audio chain: player → [varispeed] → [EQ]
-//     → [reverb] → mainMixer.
-//   • On each Hap dispatch:
-//       - sample name from hap.value["s"]
-//       - MIDI note from hap.value["note"] (pitch-shifts via varispeed)
-//       - gain  → player.volume at event time (per-event)
-//       - room  → AVAudioUnitReverb wetDryMix (per-chain compromise — see doc)
-//       - cutoff→ AVAudioUnitEQ frequency (per-chain compromise — see doc)
+//   • Sample layers: one LayerGroup per distinct sample name.
+//     Chain: player → varispeed → EQ(lpf) → reverb → delay → panner → mainMixer
+//   • Synth layers (Fase 3): one SynthLayer per distinct synth name
+//     (sawtooth, square, sine, triangle).
+//     Chain: AVAudioSourceNode → EQ(lpf+hpf) → reverb → delay → panner → mainMixer
+//     The AVAudioSourceNode mixes a pool of SynthVoice objects (polyBLEP oscillators
+//     + ADSR envelope). Voice pool size = 8 (documented default).
 //
-// Compromise (documented):
-//   room/cutoff are applied per-chain at schedule time, not per-event.
-//   Because AVAudioUnitReverb/EQ parameters are node-global (no per-buffer
-//   scheduling API in AVAudioEngine), we set them at the moment of the first
-//   hap in a burst. Events that alternate room/cutoff values would require
-//   a separate chain per value — that is a Phase 1 enhancement.
-//   gain IS per-event (player.volume is cheap to set per-buffer).
+// Synth dispatch:
+//   • hap.value["synth"] present → route to SynthLayer (no sample lookup needed).
+//   • MIDI note from hap.value["note"]; default = synthDefaultMIDI (MIDI 48 = C3)
+//     if no note field present.
+//   • Duration: (hap.whole.end − hap.whole.begin) × cycleSeconds (sustain window).
+//     Release appended after; total voice length = duration + release.
+//
+// speed():
+//   • For sample layers: multiplied with the note-based varispeed rate.
+//   • For synth layers: not applicable (frequency is computed from MIDI directly).
+//     Documented: speed() is a sample-only parameter for synths.
+//
+// Filter parameters (per-chain compromise — same as Fase 1):
+//   lpf/hpf/resonance are set at dispatch time on the SynthLayer's EQ node.
+//   They are not per-event but are updated each time a hap fires for that layer.
 // ---------------------------------------------------------------------------
 
 import AVFoundation
@@ -82,6 +87,7 @@ public final class PatternScheduler {
     private var timerSource: DispatchSourceTimer?
     private var buffers: [String: AVAudioPCMBuffer] = [:]
     private var groups: [String: LayerGroup] = [:]
+    private var synthLayers: [String: SynthLayer] = [:]   // keyed by synth name
     private let poolQueue = DispatchQueue(label: "com.miniengine.scheduler", qos: .userInteractive)
 
     // MARK: - Init
@@ -109,19 +115,24 @@ public final class PatternScheduler {
         stop()
         self.pattern = pattern
 
-        // Pre-scan first few cycles to find sample names for preloading
+        // Pre-scan first few cycles to find sample/synth names
         let scanSpan = TimeSpan(Rational(0), Rational(4))
         let previewHaps = pattern.query(scanSpan)
-        let sampleNames = Set(previewHaps.compactMap { $0.value["s"]?.stringValue })
+
+        // Separate synth names from sample names
+        let allSValues = Set(previewHaps.compactMap { $0.value["s"]?.stringValue })
+        let synths     = allSValues.filter { isSynthName($0) }
+        let samples    = allSValues.filter { !isSynthName($0) }
 
         do {
-            try preloadBuffers(for: sampleNames)
+            try preloadBuffers(for: samples)
         } catch {
             print("[PatternScheduler] Buffer preload failed: \(error)")
             return
         }
 
-        buildGroups(for: sampleNames)
+        buildGroups(for: samples)
+        buildSynthLayers(for: synths)
 
         if !audioEngine.isRunning {
             do {
@@ -166,6 +177,15 @@ public final class PatternScheduler {
         }
         groups = [:]
 
+        for layer in synthLayers.values {
+            audioEngine.detach(layer.sourceNode)
+            audioEngine.detach(layer.eq)
+            audioEngine.detach(layer.reverb)
+            audioEngine.detach(layer.delay)
+            audioEngine.detach(layer.panner)
+        }
+        synthLayers = [:]
+
         if audioEngine.isRunning {
             audioEngine.stop()
         }
@@ -197,7 +217,7 @@ public final class PatternScheduler {
         let haps       = pattern.query(querySpan)
 
         for hap in haps {
-            guard let sampleName = hap.value["s"]?.stringValue else { continue }
+            guard let sName = hap.value["s"]?.stringValue else { continue }
 
             // Event absolute time: onset of the hap's part in cycle units → seconds
             let hapCycleOnset = hap.part.begin
@@ -207,27 +227,64 @@ public final class PatternScheduler {
             guard absoluteTime >= windowStart, absoluteTime < windowEnd else { continue }
             guard absoluteTime >= startHostTime else { continue }
 
-            let midiNote      = hap.value["note"]?.doubleValue.map { Int($0) } ?? nil
+            let midiNote      = hap.value["note"]?.doubleValue
             let gainValue     = hap.value["gain"]?.doubleValue ?? 1.0
             let roomValue     = hap.value["room"]?.doubleValue
-            let cutoffValue   = hap.value["cutoff"]?.doubleValue
+            let cutoffValue   = hap.value["cutoff"]?.doubleValue ?? hap.value["lpf"]?.doubleValue
+            let hpfValue      = hap.value["hpf"]?.doubleValue
+            let resonanceVal  = hap.value["resonance"]?.doubleValue
             let panValue      = hap.value["pan"]?.doubleValue
             let delayValue    = hap.value["delay"]?.doubleValue
             let delayTimeVal  = hap.value["delaytime"]?.doubleValue
             let delayFeedVal  = hap.value["delayfeedback"]?.doubleValue
+            let speedValue    = hap.value["speed"]?.doubleValue
+            let attackVal     = hap.value["attack"]?.doubleValue
+            let decayVal      = hap.value["decay"]?.doubleValue
+            let sustainVal    = hap.value["sustain"]?.doubleValue
+            let releaseVal    = hap.value["release"]?.doubleValue
 
-            dispatchHap(
-                sampleName:    sampleName,
-                midiNote:      midiNote,
-                gain:          gainValue,
-                room:          roomValue,
-                cutoff:        cutoffValue,
-                pan:           panValue,
-                delay:         delayValue,
-                delaytime:     delayTimeVal,
-                delayfeedback: delayFeedVal,
-                absoluteTime:  absoluteTime
-            )
+            // Event duration in cycle units (for ADSR note duration)
+            let hapDurationCycles = (hap.whole ?? hap.part).end.toDouble
+                                  - (hap.whole ?? hap.part).begin.toDouble
+            let hapDurationSec = hapDurationCycles * cycleSeconds
+
+            if isSynthName(sName) {
+                // ── Synth route ─────────────────────────────────────────────
+                dispatchSynthHap(
+                    synthName:    sName,
+                    midiNote:     midiNote ?? Double(synthDefaultMIDI),
+                    gain:         gainValue,
+                    room:         roomValue,
+                    lpf:          cutoffValue,
+                    hpf:          hpfValue,
+                    resonance:    resonanceVal,
+                    pan:          panValue,
+                    delay:        delayValue,
+                    delaytime:    delayTimeVal,
+                    delayfeedback: delayFeedVal,
+                    attack:       attackVal   ?? ADSRDefaults.attack,
+                    decay:        decayVal    ?? ADSRDefaults.decay,
+                    sustain:      sustainVal  ?? ADSRDefaults.sustain,
+                    release:      releaseVal  ?? ADSRDefaults.release,
+                    durationSec:  hapDurationSec,
+                    absoluteTime: absoluteTime
+                )
+            } else {
+                // ── Sample route ────────────────────────────────────────────
+                dispatchHap(
+                    sampleName:    sName,
+                    midiNote:      midiNote.map { Int($0) },
+                    gain:          gainValue,
+                    room:          roomValue,
+                    cutoff:        cutoffValue,
+                    pan:           panValue,
+                    delay:         delayValue,
+                    delaytime:     delayTimeVal,
+                    delayfeedback: delayFeedVal,
+                    speed:         speedValue,
+                    absoluteTime:  absoluteTime
+                )
+            }
         }
     }
 
@@ -241,6 +298,7 @@ public final class PatternScheduler {
         delay:         Double?,
         delaytime:     Double?,
         delayfeedback: Double?,
+        speed:         Double?,
         absoluteTime:  Double
     ) {
         // Lazily create a group for this sample if needed
@@ -260,12 +318,14 @@ public final class PatternScheduler {
               let avTime = avAudioTime(forHostSeconds: absoluteTime) else { return }
 
         // Pitch via varispeed: 2^((midi-60)/12); root = C4 = 60
-        let rate: Float
+        // speed() multiplies the rate multiplicatively (documented).
+        let noteRate: Double
         if let midi = midiNote {
-            rate = Float(pow(2.0, Double(midi - 60) / 12.0))
+            noteRate = pow(2.0, Double(midi - 60) / 12.0)
         } else {
-            rate = 1.0
+            noteRate = 1.0
         }
+        let rate = Float(noteRate * (speed ?? 1.0))
 
         // Apply per-event gain
         group.player.volume = Float(gain)
@@ -295,6 +355,92 @@ public final class PatternScheduler {
 
         group.varispeed.rate = rate
         group.player.scheduleBuffer(buffer, at: avTime, options: [], completionHandler: nil)
+    }
+
+    // MARK: - Synth dispatch
+
+    private func dispatchSynthHap(
+        synthName:    String,
+        midiNote:     Double,
+        gain:         Double,
+        room:         Double?,
+        lpf:          Double?,
+        hpf:          Double?,
+        resonance:    Double?,
+        pan:          Double?,
+        delay:        Double?,
+        delaytime:    Double?,
+        delayfeedback: Double?,
+        attack:       Double,
+        decay:        Double,
+        sustain:      Double,
+        release:      Double,
+        durationSec:  Double,
+        absoluteTime: Double
+    ) {
+        // Lazily create a SynthLayer for this synth name
+        if synthLayers[synthName] == nil {
+            buildSynthLayers(for: [synthName])
+        }
+        guard let layer = synthLayers[synthName] else { return }
+
+        let sampleRate = audioEngine.outputNode.outputFormat(forBus: 0).sampleRate
+        let freq = synthFrequency(midi: midiNote)
+
+        // Apply per-chain effects
+        if let r = room { layer.applyRoom(r) }
+        if let f = lpf  { layer.applyLPF(freq: f, resonance: resonance) }
+        if let f = hpf  { layer.applyHPF(freq: f, resonance: resonance) }
+        if let p = pan  { layer.applyPan(p) }
+        if let d = delay {
+            layer.applyDelay(wet: d, time: delaytime, feedback: delayfeedback)
+        }
+
+        // Schedule the note: voice picks up immediately.
+        // Because AVAudioSourceNode runs continuously, the voice starts producing
+        // audio as soon as trigger() is called. For accurate timing we accept
+        // up to lookahead-ms early triggering (same trade-off as sample scheduling).
+        // The note duration governs when the release starts.
+        layer.scheduleNote(
+            freq:        freq,
+            gain:        gain,
+            attack:      attack,
+            decay:       decay,
+            sustain:     sustain,
+            release:     release,
+            durationSec: durationSec,
+            sampleRate:  sampleRate > 0 ? sampleRate : 44100.0
+        )
+    }
+
+    // MARK: - Synth layer construction
+
+    private func buildSynthLayers(for synthNames: Set<String>) {
+        let mainMixer  = audioEngine.mainMixerNode
+        let sampleRate = audioEngine.outputNode.outputFormat(forBus: 0).sampleRate
+        let sr = sampleRate > 0 ? sampleRate : 44100.0
+
+        for name in synthNames {
+            if synthLayers[name] != nil { continue }
+
+            let layer = SynthLayer(synthName: name, sampleRate: sr)
+
+            audioEngine.attach(layer.sourceNode)
+            audioEngine.attach(layer.eq)
+            audioEngine.attach(layer.reverb)
+            audioEngine.attach(layer.delay)
+            audioEngine.attach(layer.panner)
+
+            // Chain: sourceNode → EQ(lpf+hpf) → reverb → delay → panner → mainMixer
+            audioEngine.connect(layer.sourceNode, to: layer.eq,     format: nil)
+            audioEngine.connect(layer.eq,         to: layer.reverb, format: nil)
+            audioEngine.connect(layer.reverb,     to: layer.delay,  format: nil)
+            audioEngine.connect(layer.delay,      to: layer.panner, format: nil)
+            audioEngine.connect(layer.panner,     to: mainMixer,    format: nil)
+
+            synthLayers[name] = layer
+            print("[PatternScheduler] Built synth chain for: \(name)")
+        }
     }
 
     // MARK: - Group construction

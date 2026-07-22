@@ -149,6 +149,77 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["delayfeedback": .double(Double($0) ?? 0.5)] })
     }
 
+    // MARK: - Fase 3: Synth ADSR + filter + speed
+
+    public func attack(_ value: Double) -> ControlPattern {
+        withControl(.pure(["attack": .double(value)]))
+    }
+
+    public func attack(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["attack": .double(Double($0) ?? 0.001)] })
+    }
+
+    public func decay(_ value: Double) -> ControlPattern {
+        withControl(.pure(["decay": .double(value)]))
+    }
+
+    public func decay(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["decay": .double(Double($0) ?? 0.05)] })
+    }
+
+    public func sustain(_ value: Double) -> ControlPattern {
+        withControl(.pure(["sustain": .double(value)]))
+    }
+
+    public func sustain(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["sustain": .double(Double($0) ?? 0.6)] })
+    }
+
+    public func release(_ value: Double) -> ControlPattern {
+        withControl(.pure(["release": .double(value)]))
+    }
+
+    public func release(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["release": .double(Double($0) ?? 0.01)] })
+    }
+
+    /// lpf — low-pass filter frequency (Hz). Alias of cutoff for synths.
+    public func lpf(_ value: Double) -> ControlPattern {
+        withControl(.pure(["lpf": .double(value)]))
+    }
+
+    public func lpf(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["lpf": .double(Double($0) ?? 20000.0)] })
+    }
+
+    /// hpf — high-pass filter frequency (Hz).
+    public func hpf(_ value: Double) -> ControlPattern {
+        withControl(.pure(["hpf": .double(value)]))
+    }
+
+    public func hpf(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["hpf": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// resonance — filter Q (0..50 per Strudel public docs). Applied to lpf/hpf.
+    public func resonance(_ value: Double) -> ControlPattern {
+        withControl(.pure(["resonance": .double(value)]))
+    }
+
+    public func resonance(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["resonance": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// speed — sample playback rate (1=normal, 2=double speed, 0.5=half).
+    /// Negative: reverse not supported (documented). Multiplied with note repitch.
+    public func speed(_ value: Double) -> ControlPattern {
+        withControl(.pure(["speed": .double(value)]))
+    }
+
+    public func speed(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["speed": .double(Double($0) ?? 1.0)] })
+    }
+
     // MARK: - Scale / n
 
     public func n(_ pattern: String) -> ControlPattern {
@@ -181,11 +252,36 @@ extension Pattern where T == [String: ControlValue] {
     }
 }
 
+// MARK: - Synth name registry
+
+/// Names recognised as built-in oscillator synths (not sample look-ups).
+/// Verified against Strudel public docs: s("sawtooth"), s("square"), s("sine"), s("triangle")
+/// all produce oscillator-based tones.
+public let synthNames: Set<String> = ["sawtooth", "square", "sine", "triangle"]
+
+/// Returns true when `name` refers to a built-in oscillator synth.
+public func isSynthName(_ name: String) -> Bool {
+    synthNames.contains(name.lowercased())
+}
+
 // MARK: - Top-level constructors
 
 /// s("pad bell") → ControlPattern with field "s"
+/// When the name is a synth (sawtooth, square, sine, triangle) it also sets
+/// the "synth" field to the same string so the scheduler can distinguish
+/// synth layers from sample layers.
 public func s(_ miniNotation: String) -> ControlPattern {
-    parseMini(miniNotation).map { ["s": .string($0)] }
+    parseMini(miniNotation).map { name -> [String: ControlValue] in
+        var map: [String: ControlValue] = ["s": .string(name)]
+        if isSynthName(name) { map["synth"] = .string(name) }
+        return map
+    }
+}
+
+/// sound("sawtooth") — alias of s() in Strudel.
+/// Produces the same control map. The scheduler recognises "synth" field.
+public func sound(_ miniNotation: String) -> ControlPattern {
+    s(miniNotation)
 }
 
 /// note("c4 e4 g4") → ControlPattern with field "note" (MIDI number as double)
