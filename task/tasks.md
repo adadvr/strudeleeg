@@ -30,11 +30,11 @@ Plan derivado de [devstrudeleeg.md](../devstrudeleeg.md). Marcar con `[x]` al co
 - [x] Commit F2
 
 ## F3 — Motor A (Strudel WebView)
-- [ ] `index.html` local con `@strudel/web` bundleado (offline)
-- [ ] `StrudelWebEngine` con `evaluateJavaScript` desde el editor izquierdo
-- [ ] Registrar samples con `samples({...}, baseUrl)` — mismos WAV
-- [ ] Resolver acceso a archivos locales (`loadFileURL(_:allowingReadAccessTo:)`)
-- [ ] Commit F3
+- [x] `index.html` local con `@strudel/web` bundleado (offline, esbuild iife 1.2MB)
+- [x] `StrudelWebEngine` con `evaluateJavaScript` desde el editor izquierdo
+- [x] Registrar samples con `samples({ bell: { c4: [...] } }, baseUrl)` — mismos WAV, afinación C4 alineada con Motor B
+- [x] Resolver acceso a archivos locales (`loadFileURL(_:allowingReadAccessTo: Bundle.module.resourceURL)`)
+- [x] Commit F3
 
 ## F4 — UI + empaque
 - [ ] UI final: labels, Play por lado, Stop compartido, mismo código semilla en ambos editores

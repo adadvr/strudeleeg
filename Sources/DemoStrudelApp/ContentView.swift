@@ -70,14 +70,18 @@ struct ContentView: View {
             codeEditor(text: $leftCode)
 
             Button {
-                // Motor A not yet wired (F3). Show placeholder feedback.
-                vm.statusMessage = "Motor A se integra en F3 (Strudel WebView)"
+                vm.playStrudel(code: leftCode)
             } label: {
                 playButtonLabel()
             }
             .buttonStyle(PlayButtonStyle(color: .blue))
 
-            if !vm.statusMessage.isEmpty && vm.lastPlayedSide == .left {
+            if !vm.strudelError.isEmpty && vm.lastPlayedSide == .left {
+                Text(vm.strudelError)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .lineLimit(3)
+            } else if !vm.statusMessage.isEmpty && vm.lastPlayedSide == .left {
                 Text(vm.statusMessage)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -192,30 +196,62 @@ final class DemoViewModel: ObservableObject {
 
     @Published var statusMessage: String = ""
     @Published var parseError: String = ""
+    @Published var strudelError: String = ""
     @Published var lastPlayedSide: PlaySide = .none
 
     private let nativeEngine: NativeEngineAdapter
+    private let strudelEngine: StrudelWebEngine
 
     init() {
         self.nativeEngine = NativeEngineAdapter()
+        self.strudelEngine = StrudelWebEngine()
+
         self.nativeEngine.onParseError = { [weak self] msg in
             Task { @MainActor in
                 self?.parseError = msg
             }
         }
+
+        self.strudelEngine.onError = { [weak self] msg in
+            Task { @MainActor in
+                self?.strudelError = msg
+            }
+        }
+
+        self.strudelEngine.onStatusChange = { [weak self] status in
+            Task { @MainActor in
+                if status == "playing" {
+                    self?.statusMessage = "Reproduciendo Strudel (WebAudio)…"
+                } else if status == "stopped" {
+                    self?.statusMessage = ""
+                }
+            }
+        }
+    }
+
+    func playStrudel(code: String) {
+        strudelEngine.stop()          // stop current if any
+        nativeEngine.stop()           // stop the other engine for clean A/B
+        lastPlayedSide = .left
+        strudelError = ""
+        statusMessage = "Iniciando Strudel…"
+        strudelEngine.play(code: code)
     }
 
     func playNative(code: String) {
         nativeEngine.stop()           // stop previous if playing
+        strudelEngine.stop()          // stop the other engine for clean A/B
         lastPlayedSide = .right
         parseError = ""
-        statusMessage = "Reproduciendo Motor B (F1)…"
+        statusMessage = "Reproduciendo Motor B…"
         nativeEngine.play(code: code)
     }
 
     func stopAll() {
         nativeEngine.stop()
+        strudelEngine.stop()
         statusMessage = ""
+        strudelError = ""
         lastPlayedSide = .none
     }
 }

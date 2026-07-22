@@ -19,6 +19,26 @@
             "target": "DemoStrudelApp",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release DemoStrudelApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Debug ValidateEvents",
+            "target": "ValidateEvents",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ValidateEvents"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Release ValidateEvents",
+            "target": "ValidateEvents",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ValidateEvents"
         }
     ]
 }

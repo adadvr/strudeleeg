@@ -33,7 +33,8 @@ let package = Package(
             dependencies: ["NativeEngine"],
             path: "Sources/DemoStrudelApp",
             resources: [
-                .copy("Samples")
+                .copy("Samples"),
+                .copy("StrudelWeb")
             ]
         ),
         // CLI tool to validate event timing (F1 verification)

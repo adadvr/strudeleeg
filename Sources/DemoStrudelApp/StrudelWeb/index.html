@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strudel Engine</title>
+  <style>
+    body { margin: 0; padding: 0; background: #000; color: #fff; font-family: monospace; font-size: 12px; }
+    #status { padding: 4px 8px; color: #0f0; }
+    #error  { padding: 4px 8px; color: #f55; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div id="status">Loading Strudel…</div>
+  <div id="error"></div>
+
+  <!-- Offline bundle: exposes initStrudel, evaluate, hush, samples via __strudelExports -->
+  <script src="./strudel-bundle.js"></script>
+
+  <script>
+    // ─── Expose bundle exports ───────────────────────────────────────────────
+    if (typeof __strudelExports !== 'undefined') {
+      window.strudelEvaluate = __strudelExports.evaluate;
+      window.strudelHush     = __strudelExports.hush;
+      window.strudelSamples  = __strudelExports.samples;
+      // initStrudel is already assigned to window.initStrudel by the bundle
+      if (!window.initStrudel && __strudelExports.initStrudel) {
+        window.initStrudel = __strudelExports.initStrudel;
+      }
+    }
+
+    // ─── Error capture ───────────────────────────────────────────────────────
+    window.onerror = function(msg, src, line, col, err) {
+      document.getElementById('error').textContent = '[JS Error] ' + msg +
+        (err ? '\n' + err.stack : '');
+      if (window.webkit && window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.strudelError) {
+        window.webkit.messageHandlers.strudelError.postMessage(String(msg));
+      }
+      return false;
+    };
+
+    window.onunhandledrejection = function(e) {
+      var msg = e.reason
+        ? (e.reason.message || String(e.reason))
+        : 'Unhandled promise rejection';
+      document.getElementById('error').textContent = '[Promise Error] ' + msg;
+      if (window.webkit && window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.strudelError) {
+        window.webkit.messageHandlers.strudelError.postMessage(msg);
+      }
+    };
+
+    // ─── Base URL resolution ─────────────────────────────────────────────────
+    // Swift injects window.__STRUDEL_BASE_URL__ via evaluateJavaScript in
+    // WKNavigationDelegate.webView(_:didFinish:) before calling any play.
+    // Fallback: ../Samples/ from StrudelWeb/index.html resolves to the bundle's
+    // Samples/ folder automatically (bundle layout: StrudelWeb/ and Samples/ are siblings).
+    function getBaseUrl() {
+      if (window.__STRUDEL_BASE_URL__) return window.__STRUDEL_BASE_URL__;
+      return new URL('../Samples/', window.location.href).href;
+    }
+
+    // ─── Init state ──────────────────────────────────────────────────────────
+    // initReady resolves when both initStrudel() AND samples registration are done.
+    var initReady = null;   // Promise
+    var isInitialized = false;
+
+    async function doInit() {
+      var statusDiv = document.getElementById('status');
+      try {
+        statusDiv.textContent = 'Initializing Strudel audio…';
+
+        // Set up the WebAudio repl
+        await window.initStrudel();
+
+        // Register local WAV samples.
+        //
+        // bell.wav tuning: the file is recorded at C4 (MIDI 60).
+        // Strudel's superdough pitch-shifts by finding the nearest note-key and
+        // computing detune = targetNote - keyNote.
+        // With { c4: ['bell.wav'] }:
+        //   note("c4").s("bell") → key c4, transpose 0  → plays at original speed (correct C4)
+        //   note("e4").s("bell") → key c4, transpose +4 → 4 semitones up (correct E4)
+        // Without the key map (plain array), superdough assumes C2 (MIDI 36) as
+        // the base note, so c4 would play 24 semitones too high.
+        //
+        // pad.wav is a drone with no melody pitch, so a plain array is fine.
+
+        var base = getBaseUrl();
+        if (!base.endsWith('/')) base += '/';
+
+        var samplesFn = window.strudelSamples;
+        if (samplesFn) {
+          await samplesFn(
+            {
+              pad:  ['pad.wav'],
+              bell: { c4: ['bell.wav'] }
+            },
+            base
+          );
+        } else {
+          console.warn('[Strudel] samples() not found in bundle exports');
+        }
+
+        isInitialized = true;
+        window.strudelReady = true;
+        statusDiv.textContent = 'Strudel ready.';
+
+        if (window.webkit && window.webkit.messageHandlers &&
+            window.webkit.messageHandlers.strudelReady) {
+          window.webkit.messageHandlers.strudelReady.postMessage('ready');
+        }
+
+      } catch (e) {
+        statusDiv.textContent = 'Init error: ' + e.message;
+        document.getElementById('error').textContent = e.stack || e.message;
+        if (window.webkit && window.webkit.messageHandlers &&
+            window.webkit.messageHandlers.strudelError) {
+          window.webkit.messageHandlers.strudelError.postMessage('Init error: ' + e.message);
+        }
+        throw e; // re-throw so initReady rejects
+      }
+    }
+
+    // ─── Public API for Swift ────────────────────────────────────────────────
+
+    window.strudelPlay = async function(code) {
+      document.getElementById('error').textContent = '';
+      try {
+        // Resume AudioContext — macOS WKWebView may suspend it until user action.
+        // We try via superdough's getAudioContext (available in bundle exports).
+        try {
+          var getCtx = window.__strudelExports && window.__strudelExports.getAudioContext;
+          if (getCtx) {
+            var ctx = getCtx();
+            if (ctx && ctx.state !== 'running') await ctx.resume();
+          }
+        } catch (_) {}
+
+        // Wait for full initialization (initStrudel + samples registration).
+        await initReady;
+
+        var evaluateFn = window.strudelEvaluate;
+        if (!evaluateFn) throw new Error('evaluate() not available in bundle');
+
+        await evaluateFn(code, true);
+
+        if (window.webkit && window.webkit.messageHandlers &&
+            window.webkit.messageHandlers.strudelStatus) {
+          window.webkit.messageHandlers.strudelStatus.postMessage('playing');
+        }
+
+      } catch (e) {
+        var msg = e.message || String(e);
+        document.getElementById('error').textContent = '[Play Error] ' + msg;
+        if (window.webkit && window.webkit.messageHandlers &&
+            window.webkit.messageHandlers.strudelError) {
+          window.webkit.messageHandlers.strudelError.postMessage(msg);
+        }
+      }
+    };
+
+    window.strudelStop = function() {
+      try {
+        if (window.strudelHush) window.strudelHush();
+        if (window.webkit && window.webkit.messageHandlers &&
+            window.webkit.messageHandlers.strudelStatus) {
+          window.webkit.messageHandlers.strudelStatus.postMessage('stopped');
+        }
+      } catch (e) {
+        console.warn('[strudelStop]', e);
+      }
+    };
+
+    // ─── Kick off initialization immediately ─────────────────────────────────
+    // initReady is the Promise that both doInit and strudelPlay share.
+    // strudelPlay awaits it, so it can be called before init finishes.
+    initReady = doInit();
+  </script>
+</body>
+</html>
