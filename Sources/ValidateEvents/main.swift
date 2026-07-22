@@ -34,6 +34,23 @@ do {
 print("Parsed \(layers.count) layer(s)\n")
 for (i, layer) in layers.enumerated() {
     print("  Layer \(i): sample=\(layer.sample)  slowFactor=\(layer.slowFactor)  isAlternation=\(layer.isAlternation)  baseEvents=\(layer.events.count)  alts=\(layer.alternatives.count)")
+    // F2: effect chain config
+    let gainStr   = layer.gain.map   { String(format: "%.2f", $0) } ?? "—"
+    let roomStr   = layer.room.map   { String(format: "%.2f → wetDryMix=%.0f%%", $0, $0 * 100) } ?? "—"
+    let cutoffStr = layer.cutoff.map { String(format: "%.0f Hz (lowPass EQ)", $0) } ?? "—"
+    print("    Effects: gain=\(gainStr)  room=\(roomStr)  cutoff=\(cutoffStr)")
+    let chain: [String] = {
+        var c = ["player"]
+        if layer.events.contains(where: { $0.midiNote != nil }) ||
+           layer.alternatives.contains(where: { $0.contains { $0.midiNote != nil } }) {
+            c.append("varispeed")
+        }
+        if layer.cutoff != nil { c.append("EQ(lowPass)") }
+        if layer.room   != nil { c.append("reverb(mediumHall)") }
+        c.append("mainMixer")
+        return c
+    }()
+    print("    Chain:   \(chain.joined(separator: " → "))")
     if layer.isAlternation {
         for (ai, alt) in layer.alternatives.enumerated() {
             for ev in alt {
@@ -159,12 +176,21 @@ for exp in expectedBell {
 if let padLayer = layers.first(where: { $0.sample == "pad" }) {
     let gainOK = padLayer.gain   == 0.5;  print("pad  gain=0.5 : \(gainOK ? "OK" : "FAIL")"); if !gainOK { ok = false }
     let roomOK = padLayer.room   == 0.6;  print("pad  room=0.6 : \(roomOK ? "OK" : "FAIL")"); if !roomOK { ok = false }
+    // F2: pad has no cutoff → EQ should be absent (nil)
+    let noCutoffOK = padLayer.cutoff == nil
+    print("pad  cutoff=nil (no EQ) : \(noCutoffOK ? "OK" : "FAIL")"); if !noCutoffOK { ok = false }
+    // F2: wetDryMix for pad room=0.6 → 60
+    let wetOK = padLayer.room.map { abs($0 * 100 - 60) < 0.001 } ?? false
+    print("pad  room→wetDryMix=60 : \(wetOK ? "OK" : "FAIL")"); if !wetOK { ok = false }
 }
 // Bell layer effects
 if let bellLayer = layers.first(where: { $0.sample == "bell" }) {
     let gainOK   = bellLayer.gain   == 0.7;  print("bell gain=0.7    : \(gainOK   ? "OK" : "FAIL")"); if !gainOK   { ok = false }
     let roomOK   = bellLayer.room   == 0.4;  print("bell room=0.4    : \(roomOK   ? "OK" : "FAIL")"); if !roomOK   { ok = false }
     let cutoffOK = bellLayer.cutoff == 1500;  print("bell cutoff=1500 : \(cutoffOK ? "OK" : "FAIL")"); if !cutoffOK { ok = false }
+    // F2: wetDryMix for bell room=0.4 → 40
+    let wetOK = bellLayer.room.map { abs($0 * 100 - 40) < 0.001 } ?? false
+    print("bell room→wetDryMix=40  : \(wetOK ? "OK" : "FAIL")"); if !wetOK { ok = false }
 }
 
 print("\nResult: \(ok ? "ALL PASS ✓" : "SOME CHECKS FAILED ✗")")

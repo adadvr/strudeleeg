@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 // ---------------------------------------------------------------------------
-// Scheduler — F1
+// Scheduler — F2
 // Cycle-based lookahead scheduler built on AVAudioEngine.
 //
 // Tempo: 0.5 cycles/second → 1 cycle = 2 seconds (Strudel default).
@@ -15,11 +15,44 @@ import Foundation
 //     (converted to AVAudioTime in host ticks / sample time) as t=0.
 //   • Each event's AVAudioTime = anchor + (absoluteTimeInSeconds * sampleRate).
 //
-// Nodes:
-//   • One AVAudioPlayerNode per "pad" event (fire-and-forget per shot).
-//   • For "bell" (pitched), pool of AVAudioPlayerNode + AVAudioUnitVarispeed,
-//     rate = 2^((midi-60)/12).  Root note is C4 = MIDI 60.
+// F2 — Per-layer effect chains
+// ─────────────────────────────
+//   • Each layer gets its own LayerChain: one player node (+ varispeed if the
+//     layer has note/pitch events) wired through optional EQ and reverb to
+//     the main mixer.
+//
+//   Chain topology per layer:
+//     player → [varispeed] → [EQ lowPass if cutoff≠nil] → [reverb if room≠nil] → mainMixer
+//
+//   • gain  (0..1) → player.volume
+//   • cutoff (Hz)  → AVAudioUnitEQ, single lowPass band, bypass=false
+//   • room  (0..1) → AVAudioUnitReverb, wetDryMix = room*100
+//                    Preset: .mediumHall — chosen because it gives a neutral,
+//                    medium-decay hall tail (~1.5 s) that matches Strudel's
+//                    generic "room" reverb for meditation pads and bells without
+//                    the excessive muddiness of .largeHall or .cathedral.
+//
+//   The chain is rebuilt on every play() so re-parsings with different values
+//   take effect cleanly (no stale nodes).
 // ---------------------------------------------------------------------------
+
+/// Holds all AVAudio nodes that belong to one parsed layer.
+private final class LayerChain {
+    let player: AVAudioPlayerNode
+    let varispeed: AVAudioUnitVarispeed?  // non-nil only when pitch-shifting is needed
+    let eq: AVAudioUnitEQ?               // non-nil when layer.cutoff != nil
+    let reverb: AVAudioUnitReverb?        // non-nil when layer.room != nil
+
+    init(player: AVAudioPlayerNode,
+         varispeed: AVAudioUnitVarispeed?,
+         eq: AVAudioUnitEQ?,
+         reverb: AVAudioUnitReverb?) {
+        self.player = player
+        self.varispeed = varispeed
+        self.eq = eq
+        self.reverb = reverb
+    }
+}
 
 public final class Scheduler {
 
@@ -50,16 +83,10 @@ public final class Scheduler {
     // Loaded audio buffers (one per sample)
     private var buffers: [String: AVAudioPCMBuffer] = [:]
 
-    // Pool of player nodes — we keep them attached to the engine
-    // and recycle them for new shots.
-    private var playerPool: [PlayerSlot] = []
-    private let poolQueue = DispatchQueue(label: "com.strudel.scheduler.pool")
+    // Per-layer effect chains (index matches layers array)
+    private var chains: [LayerChain] = []
 
-    private struct PlayerSlot {
-        let playerNode: AVAudioPlayerNode
-        let varispeedNode: AVAudioUnitVarispeed?   // nil for pad (no pitch shift)
-        var inUse: Bool
-    }
+    private let poolQueue = DispatchQueue(label: "com.strudel.scheduler.pool")
 
     // MARK: - Init
 
@@ -70,7 +97,7 @@ public final class Scheduler {
 
     // MARK: - Public API
 
-    /// Parse `code`, set up layers, reset cycle, start scheduling.
+    /// Set up layers with effect chains, reset cycle, start scheduling.
     public func play(layers: [Layer]) {
         stop()
 
@@ -84,6 +111,10 @@ public final class Scheduler {
             return
         }
 
+        // Build per-layer effect chains (must happen before engine start so
+        // nodes are attached and connected before audio graph is running)
+        buildChains(for: layers)
+
         // Start engine if needed
         if !audioEngine.isRunning {
             do {
@@ -91,6 +122,13 @@ public final class Scheduler {
             } catch {
                 print("[Scheduler] Could not start AVAudioEngine: \(error)")
                 return
+            }
+        }
+
+        // Start all player nodes so they are ready to receive scheduled buffers
+        for chain in chains {
+            if !chain.player.isPlaying {
+                chain.player.play()
             }
         }
 
@@ -116,12 +154,113 @@ public final class Scheduler {
         timerSource?.cancel()
         timerSource = nil
 
-        poolQueue.sync {
-            for slot in playerPool {
-                slot.playerNode.stop()
-            }
+        // Stop all player nodes, then detach all nodes in each chain
+        for chain in chains {
+            chain.player.stop()
+            detachChain(chain)
         }
+        chains = []
+
         print("[Scheduler] Stopped")
+    }
+
+    // MARK: - Effect chain construction
+
+    /// Build and attach one LayerChain per layer, connecting the audio graph.
+    private func buildChains(for layers: [Layer]) {
+        let mainMixer = audioEngine.mainMixerNode
+
+        for layer in layers {
+            // Does this layer ever produce pitched events?
+            let needsPitch = layer.isAlternation
+                ? layer.alternatives.contains { $0.contains { $0.midiNote != nil } }
+                : layer.events.contains { $0.midiNote != nil }
+
+            // --- Create nodes ---
+            let player = AVAudioPlayerNode()
+
+            let varispeed: AVAudioUnitVarispeed? = needsPitch ? AVAudioUnitVarispeed() : nil
+
+            let eq: AVAudioUnitEQ?
+            if let hz = layer.cutoff {
+                let unit = AVAudioUnitEQ(numberOfBands: 1)
+                let band = unit.bands[0]
+                band.filterType = .lowPass
+                band.frequency  = Float(hz)
+                band.bypass     = false
+                // Resonance (Q): 0 dB keeps it a clean Butterworth-like response,
+                // neutral for a meditation low-pass without resonance peaks.
+                band.bandwidth  = 1.0   // octaves — ignored for lowPass; Q is implicit
+                eq = unit
+            } else {
+                eq = nil
+            }
+
+            let reverb: AVAudioUnitReverb?
+            if let room = layer.room {
+                let unit = AVAudioUnitReverb()
+                // .mediumHall: neutral hall decay (~1.5 s), transparent enough for
+                // bell transients, warm enough for pad drones. largeHall adds ~3 s
+                // decay that muddies overlapping bell events; cathedral would be
+                // overkill. mediumHall matches Strudel's generic "room" feel.
+                unit.loadFactoryPreset(.mediumHall)
+                unit.wetDryMix = Float(room * 100)
+                reverb = unit
+            } else {
+                reverb = nil
+            }
+
+            // --- Apply gain to player volume ---
+            player.volume = Float(layer.gain ?? 1.0)
+
+            // --- Attach all nodes ---
+            audioEngine.attach(player)
+            if let vs = varispeed { audioEngine.attach(vs) }
+            if let eq = eq        { audioEngine.attach(eq) }
+            if let rv = reverb    { audioEngine.attach(rv) }
+
+            // --- Wire the chain ---
+            // player → [varispeed] → [eq] → [reverb] → mainMixer
+            var upstream: AVAudioNode = player
+
+            if let vs = varispeed {
+                audioEngine.connect(upstream, to: vs, format: nil)
+                upstream = vs
+            }
+            if let eq = eq {
+                audioEngine.connect(upstream, to: eq, format: nil)
+                upstream = eq
+            }
+            if let rv = reverb {
+                audioEngine.connect(upstream, to: rv, format: nil)
+                upstream = rv
+            }
+
+            audioEngine.connect(upstream, to: mainMixer, format: nil)
+
+            let chain = LayerChain(player: player, varispeed: varispeed, eq: eq, reverb: reverb)
+            chains.append(chain)
+
+            // Debug log
+            let gainStr   = layer.gain.map   { String(format: "%.2f", $0) } ?? "—"
+            let roomStr   = layer.room.map   { String(format: "%.2f", $0) } ?? "—"
+            let cutoffStr = layer.cutoff.map { String(format: "%.0f Hz", $0) } ?? "—"
+            print("[Scheduler] Chain built: sample=\(layer.sample)"
+                + " player.volume=\(gainStr)"
+                + " varispeed=\(varispeed != nil)"
+                + " EQ(lowPass)=\(cutoffStr)"
+                + " reverb(mediumHall)=\(roomStr)"
+            )
+        }
+    }
+
+    /// Detach all nodes in a chain from the engine.
+    private func detachChain(_ chain: LayerChain) {
+        chain.player.stop()
+        audioEngine.detach(chain.player)
+        if let vs = chain.varispeed { audioEngine.detach(vs) }
+        if let eq = chain.eq        { audioEngine.detach(eq) }
+        if let rv = chain.reverb    { audioEngine.detach(rv) }
     }
 
     // MARK: - Scheduling loop
@@ -138,13 +277,14 @@ public final class Scheduler {
     }
 
     private func scheduleEvents(from windowStart: Double, to windowEnd: Double) {
-        // Convert absolute host seconds to cycle-relative position
-        let elapsed0 = windowStart - startHostTime  // elapsed at window start
-        let elapsed1 = windowEnd   - startHostTime  // elapsed at window end
+        let elapsed0 = windowStart - startHostTime
+        let elapsed1 = windowEnd   - startHostTime
 
-        for layer in layers {
+        for (layerIndex, layer) in layers.enumerated() {
+            guard layerIndex < chains.count else { continue }
+            let chain = chains[layerIndex]
+
             let cycleDuration = Scheduler.CYCLE_SECONDS * layer.slowFactor
-            // Which cycles overlap with [elapsed0, elapsed1)?
             let firstCycle = Int(floor(elapsed0 / cycleDuration))
             let lastCycle  = Int(floor(elapsed1 / cycleDuration))
 
@@ -155,14 +295,11 @@ public final class Scheduler {
                 for event in events {
                     let absoluteTime = startHostTime + cycleStart + event.cycleOnset * cycleDuration
 
-                    // Only schedule events inside [windowStart, windowEnd)
-                    // and that we haven't already scheduled (>= our old scheduledUpTo).
                     guard absoluteTime >= windowStart, absoluteTime < windowEnd else { continue }
-
-                    // Also guard against past events on first call
                     guard absoluteTime >= startHostTime else { continue }
 
                     scheduleEvent(
+                        chain: chain,
                         sample: layer.sample,
                         midiNote: event.midiNote,
                         absoluteHostSeconds: absoluteTime
@@ -172,18 +309,20 @@ public final class Scheduler {
         }
     }
 
-    private func scheduleEvent(sample: String, midiNote: Int?, absoluteHostSeconds: Double) {
+    private func scheduleEvent(chain: LayerChain,
+                               sample: String,
+                               midiNote: Int?,
+                               absoluteHostSeconds: Double) {
         guard let buffer = buffers[sample] else {
             print("[Scheduler] No buffer for sample: \(sample)")
             return
         }
 
-        // Compute AVAudioTime from absolute host seconds
-        guard let avTime = avAudioTime(forHostSeconds: absoluteHostSeconds, format: buffer.format) else {
+        guard let avTime = avAudioTime(forHostSeconds: absoluteHostSeconds) else {
             return
         }
 
-        // Pitch rate: 2^((midi-60)/12)
+        // Pitch rate: 2^((midi-60)/12). Root note of samples is C4 = MIDI 60.
         let rate: Float
         if let midi = midiNote {
             rate = Float(pow(2.0, Double(midi - 60) / 12.0))
@@ -191,71 +330,22 @@ public final class Scheduler {
             rate = 1.0
         }
 
-        scheduleBufferFired(buffer: buffer, at: avTime, rate: rate)
-    }
-
-    // MARK: - Node pool management
-
-    private func scheduleBufferFired(buffer: AVAudioPCMBuffer, at time: AVAudioTime, rate: Float) {
-        poolQueue.async { [weak self] in
-            guard let self else { return }
-
-            let needsVarispeed = (rate != 1.0)
-            let slot = self.acquireSlot(needsVarispeed: needsVarispeed)
-
-            if let vs = slot.varispeedNode {
+        poolQueue.async {
+            if let vs = chain.varispeed {
                 vs.rate = rate
             }
 
-            slot.playerNode.scheduleBuffer(buffer, at: time, options: [], completionHandler: {
-                self.poolQueue.async {
-                    // Mark slot free (we don't actually need to track — nodes can
-                    // be scheduled again without issue; AVAudioPlayerNode queues internally)
-                }
-            })
-            // Ensure the node is playing (might already be from a prior shot)
-            if !slot.playerNode.isPlaying {
-                slot.playerNode.play()
-            }
-        }
-    }
+            chain.player.scheduleBuffer(buffer, at: avTime, options: [], completionHandler: nil)
 
-    /// Acquire or create a player slot. We keep a small pool and grow as needed.
-    private func acquireSlot(needsVarispeed: Bool) -> PlayerSlot {
-        // Try to find an existing slot of the right type
-        for i in playerPool.indices {
-            let slot = playerPool[i]
-            let hasVarispeed = slot.varispeedNode != nil
-            if hasVarispeed == needsVarispeed {
-                return slot  // reuse (AVAudioPlayerNode queues multiple buffers)
+            if !chain.player.isPlaying {
+                chain.player.play()
             }
         }
-        // Create a new slot
-        let player = AVAudioPlayerNode()
-        var slot: PlayerSlot
-        if needsVarispeed {
-            let vs = AVAudioUnitVarispeed()
-            audioEngine.attach(player)
-            audioEngine.attach(vs)
-            let mainMixer = audioEngine.mainMixerNode
-            audioEngine.connect(player, to: vs, format: nil)
-            audioEngine.connect(vs, to: mainMixer, format: mainMixer.outputFormat(forBus: 0))
-            slot = PlayerSlot(playerNode: player, varispeedNode: vs, inUse: false)
-        } else {
-            audioEngine.attach(player)
-            let mainMixer = audioEngine.mainMixerNode
-            audioEngine.connect(player, to: mainMixer, format: nil)
-            slot = PlayerSlot(playerNode: player, varispeedNode: nil, inUse: false)
-        }
-        // Start engine connections take effect automatically (engine must be running or prepared)
-        playerPool.append(slot)
-        return slot
     }
 
     // MARK: - Buffer loading
 
     private func preloadBuffers() throws {
-        // Collect which samples are actually needed
         let needed = Set(layers.map { $0.sample })
         for name in needed {
             if buffers[name] != nil { continue }
@@ -277,15 +367,13 @@ public final class Scheduler {
     // MARK: - Time utilities
 
     private func hostTimeNow() -> Double {
-        // mach_absolute_time is in mach ticks; convert to seconds using timebase
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
         let ticks = mach_absolute_time()
         return Double(ticks) * Double(info.numer) / Double(info.denom) / 1_000_000_000.0
     }
 
-    private func avAudioTime(forHostSeconds seconds: Double, format: AVAudioFormat) -> AVAudioTime? {
-        // Convert host seconds → mach ticks
+    private func avAudioTime(forHostSeconds seconds: Double) -> AVAudioTime? {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
         let nanoSeconds = seconds * 1_000_000_000.0

@@ -23,11 +23,11 @@ Plan derivado de [devstrudeleeg.md](../devstrudeleeg.md). Marcar con `[x]` al co
 - [x] Commit F1
 
 ## F2 — Motor B efectos
-- [ ] `cutoff` → AVAudioUnitEQ low-pass
-- [ ] `room` → AVAudioUnitReverb (wet)
-- [ ] `gain` → volumen del nodo
-- [ ] Verificar piso de aceptación: código semilla suena igual en ambos lados
-- [ ] Commit F2
+- [x] `cutoff` → AVAudioUnitEQ low-pass
+- [x] `room` → AVAudioUnitReverb (wet, preset mediumHall)
+- [x] `gain` → volumen del nodo
+- [ ] Verificar piso de aceptación: código semilla suena igual en ambos lados (pendiente de F3 para comparar A/B de oído)
+- [x] Commit F2
 
 ## F3 — Motor A (Strudel WebView)
 - [ ] `index.html` local con `@strudel/web` bundleado (offline)

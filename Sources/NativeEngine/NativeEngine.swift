@@ -24,9 +24,9 @@ public enum PlayResult {
 }
 
 // ---------------------------------------------------------------------------
-// NativeEngine — F1
+// NativeEngine — F2
 // Wires MiniNotationParser → Scheduler → AVAudioEngine.
-// Effects (gain/room/cutoff) are parsed and stored but not applied yet (F2).
+// Effects (gain/room/cutoff) are applied per-layer in the Scheduler (F2).
 // ---------------------------------------------------------------------------
 
 /// Initialise with a dictionary of sample name → URL so the engine never
@@ -96,7 +96,7 @@ public final class NativeEngine: AudioDemoEngineProtocol {
         scheduler = sched
         sched.play(layers: layers)
         isPlaying = true
-        print("[NativeEngine] Playing F1 (parser + scheduler)")
+        print("[NativeEngine] Playing F2 (parser + scheduler + effects)")
     }
 
     public func stop() {
