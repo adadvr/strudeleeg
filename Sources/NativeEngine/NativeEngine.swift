@@ -48,7 +48,9 @@ public final class NativeEngine: AudioDemoEngineProtocol {
 
     public init(sampleURLs: [String: URL]) {
         self.sampleURLs = sampleURLs
-        prepareEngine()
+        // No prepare() here: con el grafo vacío (sin nodos conectados) AVAudioEngine
+        // lanza NSException (AVAudioEngineGraph Initialize) y mata la app al arrancar.
+        // El Scheduler conecta la cadena y arranca el engine en cada play().
     }
 
     // MARK: - AudioDemoEngineProtocol
@@ -83,15 +85,8 @@ public final class NativeEngine: AudioDemoEngineProtocol {
             print("[NativeEngine] Layer \(i): sample=\(layer.sample) slowFactor=\(layer.slowFactor) isAlternation=\(layer.isAlternation) events=\(layer.events.count) gain=\(layer.gain.map { "\($0)" } ?? "nil") room=\(layer.room.map { "\($0)" } ?? "nil") cutoff=\(layer.cutoff.map { "\($0)" } ?? "nil")")
         }
 
-        if !audioEngine.isRunning {
-            do {
-                try audioEngine.start()
-            } catch {
-                print("[NativeEngine] Failed to start engine: \(error)")
-                return
-            }
-        }
-
+        // El engine lo arranca el Scheduler DESPUÉS de conectar la cadena de nodos;
+        // arrancarlo aquí con el grafo aún vacío lanza NSException.
         let sched = Scheduler(audioEngine: audioEngine, sampleURLs: sampleURLs)
         scheduler = sched
         sched.play(layers: layers)
@@ -105,9 +100,4 @@ public final class NativeEngine: AudioDemoEngineProtocol {
         isPlaying = false
     }
 
-    // MARK: - Private
-
-    private func prepareEngine() {
-        audioEngine.prepare()
-    }
 }

@@ -161,8 +161,10 @@ final class StrudelWebEngine: NSObject, @preconcurrency AudioDemoEngine, WKNavig
     }
 
     /// Returns a JSON string literal (with quotes) safe for embedding in JS.
+    /// .fragmentsAllowed es obligatorio: sin él, un String top-level lanza
+    /// NSException (no un Swift error, así que try? no la atrapa).
     private func encodeStringAsJSONString(_ s: String) -> String? {
-        guard let data = try? JSONSerialization.data(withJSONObject: s),
+        guard let data = try? JSONSerialization.data(withJSONObject: s, options: [.fragmentsAllowed]),
               let str = String(data: data, encoding: .utf8)
         else { return nil }
         return str
