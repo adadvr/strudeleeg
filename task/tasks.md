@@ -5,15 +5,15 @@ Plan derivado de [devstrudeleeg.md](../devstrudeleeg.md). Marcar con `[x]` al co
 ## Setup
 - [x] Inicializar repo git en branch `main` y vincular remote `https://github.com/adadvr/strudeleeg.git`
 - [x] Primer commit (brief + tareas + .gitignore)
-- [ ] Push inicial a origin
+- [x] Push inicial a origin
 
 ## F0 — Scaffold
-- [ ] Estructura Swift Package (app SwiftUI ejecutable, target `NativeEngine` aislado)
-- [ ] Ventana con dos paneles vacíos (izq: Strudel, der: Mini Engine)
-- [ ] Generar samples `pad.wav` y `bell.wav` (set libre, aptos para meditación)
-- [ ] "Hola mundo" de audio: un WAV suena por AVAudioEngine
-- [ ] Script de build que arma `DemoStrudel.app`
-- [ ] Commit F0
+- [x] Estructura Swift Package (app SwiftUI ejecutable, target `NativeEngine` aislado)
+- [x] Ventana con dos paneles vacíos (izq: Strudel, der: Mini Engine)
+- [x] Generar samples `pad.wav` y `bell.wav` (set libre, aptos para meditación)
+- [x] "Hola mundo" de audio: un WAV suena por AVAudioEngine
+- [x] Script de build que arma `DemoStrudel.app`
+- [x] Commit F0
 
 ## F1 — Motor B seco
 - [ ] `MiniNotationParser`: subset `stack`, `s`, `note`, `slow`, `fast`, `<...>`, secuencia, `[...]`, `gain`, `room`, `cutoff` (clean-room, solo doc pública)
