@@ -43,5 +43,11 @@ let package = Package(
             dependencies: ["NativeEngine"],
             path: "Sources/ValidateEvents"
         ),
+        // Headless probe to diagnose the Strudel WebView engine
+        .executableTarget(
+            name: "WebProbe",
+            dependencies: [],
+            path: "Sources/WebProbe"
+        ),
     ]
 )

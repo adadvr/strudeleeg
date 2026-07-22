@@ -39,6 +39,26 @@
             "target": "ValidateEvents",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release ValidateEvents"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Debug WebProbe",
+            "target": "WebProbe",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug WebProbe"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Release WebProbe",
+            "target": "WebProbe",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release WebProbe"
         }
     ]
 }

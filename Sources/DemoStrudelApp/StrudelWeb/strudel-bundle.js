@@ -24380,6 +24380,7 @@ registerProcessor('${n2}', MyProcessor);
   var entry_exports = {};
   __export(entry_exports, {
     evaluate: () => evaluate,
+    getAudioContext: () => z2,
     hush: () => hush,
     initStrudel: () => initStrudel,
     samples: () => ao2

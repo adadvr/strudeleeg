@@ -49,6 +49,18 @@ final class StrudelWebEngine: NSObject, @preconcurrency AudioDemoEngine, WKNavig
         // Allow audio without requiring a user gesture (critical for macOS WKWebView)
         config.mediaTypesRequiringUserActionForPlayback = []
 
+        // Verificado con WebProbe — sin estas dos parejas de preferencias el
+        // Motor A queda en silencio:
+        // 1) fetch() de los WAV por file:// falla ("TypeError: Load failed");
+        //    estas claves permiten leer file:// desde la página file://.
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+        // 2) WebKit throttlea los timers de una página "oculta" (el WebView vive
+        //    en una ventana invisible) y el reloj de Strudel pierde todos sus
+        //    deadlines ("skip query: too late") → nunca agenda audio.
+        config.preferences.setValue(false, forKey: "hiddenPageDOMTimerThrottlingEnabled")
+        config.preferences.setValue(false, forKey: "pageVisibilityBasedProcessSuppressionEnabled")
+
         // Inject the Samples base URL at document start so the JS can read it
         // synchronously before doInit() calls getBaseUrl().
         if let baseUrlScript = makeSamplesBaseUrlScript() {
