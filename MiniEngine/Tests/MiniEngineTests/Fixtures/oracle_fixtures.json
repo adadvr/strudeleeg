@@ -1139,5 +1139,527 @@
         }
       }
     ]
+  },
+  {
+    "pattern": "s(\"pad bell\").rev",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"[pad bell] hi\").rev",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "hi"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad bell\").ply(2)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad\").ply(3)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/3"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/3"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/3",
+          "end": "2/3"
+        },
+        "part": {
+          "begin": "1/3",
+          "end": "2/3"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "2/3",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "2/3",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad bell\").every(4, x => x.fast(2))",
+    "span": [
+      0,
+      4
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/1",
+          "end": "3/2"
+        },
+        "part": {
+          "begin": "1/1",
+          "end": "3/2"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/2",
+          "end": "2/1"
+        },
+        "part": {
+          "begin": "3/2",
+          "end": "2/1"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "2/1",
+          "end": "5/2"
+        },
+        "part": {
+          "begin": "2/1",
+          "end": "5/2"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "5/2",
+          "end": "3/1"
+        },
+        "part": {
+          "begin": "5/2",
+          "end": "3/1"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/1",
+          "end": "7/2"
+        },
+        "part": {
+          "begin": "3/1",
+          "end": "7/2"
+        },
+        "value": {
+          "s": "pad"
+        }
+      },
+      {
+        "whole": {
+          "begin": "7/2",
+          "end": "4/1"
+        },
+        "part": {
+          "begin": "7/2",
+          "end": "4/1"
+        },
+        "value": {
+          "s": "bell"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"bell\").off(0.25, x => x.gain(0.5))",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "-3/4",
+          "end": "1/4"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "value": {
+          "s": "bell",
+          "gain": 0.5
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/4",
+          "end": "5/4"
+        },
+        "part": {
+          "begin": "1/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell",
+          "gain": 0.5
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad bell\").jux(x => x.fast(2))",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "pad",
+          "pan": 0
+        }
+      },
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "value": {
+          "s": "pad",
+          "pan": 1
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "bell",
+          "pan": 1
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell",
+          "pan": 0
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "value": {
+          "s": "pad",
+          "pan": 1
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell",
+          "pan": 1
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"bell\").struct(\"t ~ t t\")",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "value": {
+          "s": "bell"
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell"
+        }
+      }
+    ]
   }
 ]

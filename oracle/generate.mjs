@@ -301,6 +301,91 @@ const CASES = [
         .set(pure({ delayfeedback: 0.6 }));
     },
   },
+
+  // ── Fase 2 / Tier 3: Pattern algebra ────────────────────────────────────────
+
+  // rev — reverses the pattern within each cycle
+  // s("pad bell").rev → bell comes first, then pad
+  {
+    label: 's("pad bell").rev',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({ s: 'pad' }), pure({ s: 'bell' })).rev();
+    },
+  },
+
+  // rev with subgroup — s("[pad bell] hi").rev
+  // original order: [pad bell] at 0..1/2, hi at 1/2..1
+  // reversed: hi at 0..1/2, [pad bell] at 1/2..1 (subgroup itself also reversed)
+  {
+    label: 's("[pad bell] hi").rev',
+    spanCycles: 1,
+    build() {
+      const inner = fastcat(pure({ s: 'pad' }), pure({ s: 'bell' }));
+      return fastcat(inner, pure({ s: 'hi' })).rev();
+    },
+  },
+
+  // ply(2) — repeat each event 2 times within its duration
+  // s("pad bell").ply(2) → 4 events: pad/2, pad/2, bell/2, bell/2
+  {
+    label: 's("pad bell").ply(2)',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({ s: 'pad' }), pure({ s: 'bell' })).ply(2);
+    },
+  },
+
+  // ply(3) on single event
+  {
+    label: 's("pad").ply(3)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'pad' }).ply(3);
+    },
+  },
+
+  // every(4, fast(2)) — applies fast(2) on cycles 0, 4, 8, ...
+  // verify cycle 0 has 4 events, cycles 1-3 have 2 events
+  {
+    label: 's("pad bell").every(4, x => x.fast(2))',
+    spanCycles: 4,
+    build() {
+      return fastcat(pure({ s: 'pad' }), pure({ s: 'bell' })).every(4, x => x.fast(2));
+    },
+  },
+
+  // off(0.25, gain 0.5) — stacks original + shifted copy with gain
+  // off(t, f) = stack(orig, f(orig).rotL(t))
+  {
+    label: 's("bell").off(0.25, x => x.gain(0.5))',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'bell' }).off(1 / 4, x => x.set(pure({ gain: 0.5 })));
+    },
+  },
+
+  // jux(fast(2)) — original pan=0, transformed pan=1
+  // confirms pan values 0 and 1
+  {
+    label: 's("pad bell").jux(x => x.fast(2))',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({ s: 'pad' }), pure({ s: 'bell' })).jux(x => x.fast(2));
+    },
+  },
+
+  // struct("t ~ t t") — boolean gate: 4 slots, slots 0/2/3 fire, slot 1 silent
+  // = fastcat(pure(true), pure(false), pure(true), pure(true)) as mask
+  {
+    label: 's("bell").struct("t ~ t t")',
+    spanCycles: 1,
+    build() {
+      // Build the boolean mask explicitly: t=true, ~=false, t=true, t=true
+      const mask = fastcat(pure(true), pure(false), pure(true), pure(true));
+      return pure({ s: 'bell' }).struct(mask);
+    },
+  },
 ];
 
 // ── Query and serialize ──────────────────────────────────────────────────────

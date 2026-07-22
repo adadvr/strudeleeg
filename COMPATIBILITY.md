@@ -29,13 +29,15 @@ Living document: function → status → equivalence notes.
 | Mini `a*n` fast | ✅ nativo (Fase 1) | Step plays n times faster within its slot |
 | Mini `a!n` replicate | ✅ nativo (Fase 1) | Expand to n equal copies of the step. Default n=2 if no number |
 | Mini `a@w` weight | ✅ nativo (Fase 1) | Step occupies w weight-units relative to others (e.g. `a@3 b` → a=3/4, b=1/4) |
-| `rev` | ❌ no | Invert pattern |
-| `ply(n)` | ❌ no | Repeat each event n times (rolls) |
-| `every(n, f)` | ❌ no | Apply transformation every n cycles |
-| `sometimes` / `often` / `rarely` | ❌ no | Probabilistic application (needs RNG seed) |
-| `off(t, f)` | ❌ no | Phase-shifted copy |
-| `jux(f)` | ❌ no | Stereo split with transform |
-| `struct("...")` | ❌ no | Boolean structure pattern |
+| `rev` | ✅ nativo (Fase 2) | Reverses events within each cycle. `s("pad bell").rev` → bell, pad. Oracle verified including subgroups `[]` |
+| `ply(n)` | ✅ nativo (Fase 2) | Repeats each event n times within its structural duration (rolls). `s("pad bell").ply(2)` → 4 events. Oracle verified |
+| `every(n, f)` | ✅ nativo (Fase 2) | Applies f on cycles 0, n, 2n, … (cycle 0 of each block of n). Confirmed with oracle: `every(4, fast(2))` → cycles 0,4,8 get 4 events; 1,2,3 get 2. Lambda parser supports `x => x.method(args)` chaining |
+| `sometimes(f)` | ✅ nativo (Fase 2) | Applies f with probability 0.5. **RNG: deterministic PRNG (xorshift64, seeded by cycle+eventIndex)**. Statistical equivalence only — Strudel's internal RNG is time-based and not reproducible clean-room. See note below |
+| `often(f)` | ✅ nativo (Fase 2) | Applies f with probability 0.75. Same RNG note |
+| `rarely(f)` | ✅ nativo (Fase 2) | Applies f with probability 0.25. Same RNG note |
+| `off(t, f)` | ✅ nativo (Fase 2) | Stacks original + f(copy) shifted RIGHT by t cycles. `off(t,f) = stack(self, f(self).rotR(t))`. Oracle confirmed: pan=0, copy's whole at t offset |
+| `jux(f)` | ✅ nativo (Fase 2) | Original at pan=0 (left), f(copy) at pan=1 (right). Oracle confirmed pan values are exactly 0 and 1 |
+| `struct("...")` | ✅ nativo (Fase 2) | Boolean gate: fires events at positions where mask is true. Supports `t`/`true` and `~`/`f`/`false`. Oracle verified |
 | `sound(...)` (synths) | ❌ no | Oscillator synths (Fase 3) |
 | `attack`/`decay`/`sustain`/`release` | ❌ no | ADSR envelope (Fase 3) |
 | `lpf`/`hpf` | ❌ no | High-pass filter (Fase 3) |
@@ -44,6 +46,15 @@ Living document: function → status → equivalence notes.
 | `chop` / `striate` | ❌ no | Granular (Fase 4) |
 | `crush` | ❌ no | Bitcrusher (Fase 4) |
 | `vowel` | ❌ no | Formant filter (Fase 4) |
+
+## Nota sobre equivalencia estadística del RNG (sometimes/often/rarely)
+
+Strudel usa una señal `rand` basada en tiempo (no determinista desde el exterior) para decidir qué eventos transformar en `sometimes`/`often`/`rarely`. No es accesible de forma clean-room.
+
+El MiniEngine implementa un PRNG puro (xorshift64 + splitmix64) sembrado por `(ciclo, índice_evento)`:
+- **Determinismo garantizado**: mismo seed → misma secuencia siempre (crucial para reproducibilidad y tests estables).
+- **Equivalencia estadística**: la proporción de aplicación converge a la probabilidad especificada (0.5, 0.75, 0.25) en muchos ciclos.
+- **No equivalente bit a bit**: la decisión concreta por evento difiere de Strudel (distintas semillas/algoritmos). Esto es correcto para producción clean-room y para el EEG (donde queremos seed controlada, no aleatoriedad del motor web).
 
 ## Defaults (documented)
 

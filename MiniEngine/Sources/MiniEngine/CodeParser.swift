@@ -136,12 +136,13 @@ public struct CodeParser {
         "pan",
         "delay", "delaytime", "delayfeedback",
         "euclid",
-        "stack"
+        "stack",
+        // Fase 2 / Tier 3
+        "rev", "ply", "every", "sometimes", "often", "rarely",
+        "off", "jux", "struct"
     ]
 
     private let friendlyUnknown: Set<String> = [
-        "rev", "ply", "every", "sometimes", "often", "rarely",
-        "off", "jux", "struct",
         "shape", "distort", "chorus", "phaser",
         "chop", "striate", "crush", "vowel",
         "speed", "attack", "decay", "sustain", "release",
@@ -186,21 +187,24 @@ public struct CodeParser {
             throw CodeParseError.syntaxError("Layer must start with s(...), note(...), or n(...): \(expr)")
         }
 
-        // ── Timing modifiers ────────────────────────────────────────────────
-        if let slowToken = chain.first(where: { $0.name == "slow" }),
-           let arg = slowToken.arg,
-           let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
-            pattern = pattern.slow(factor)
-        } else if let fastToken = chain.first(where: { $0.name == "fast" }),
-                  let arg = fastToken.arg,
-                  let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
-            pattern = pattern.fast(factor)
-        }
-
         // ── Effect / control modifiers (in chain order) ─────────────────────
         for token in chain {
             switch token.name {
 
+            // ── Timing ───────────────────────────────────────────────────────
+            case "slow":
+                if let arg = token.arg,
+                   let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.slow(factor)
+                }
+
+            case "fast":
+                if let arg = token.arg,
+                   let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.fast(factor)
+                }
+
+            // ── Audio controls ───────────────────────────────────────────────
             case "gain":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
@@ -266,12 +270,182 @@ public struct CodeParser {
                     pattern = pattern.scale(t)
                 }
 
+            // ── Fase 2 / Tier 3: Pattern algebra ─────────────────────────────
+
+            case "rev":
+                // rev has no args (used as property: .rev or as method call .rev())
+                pattern = pattern.rev
+
+            case "ply":
+                if let arg = token.arg,
+                   let n = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.ply(n)
+                }
+
+            case "every":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    if parts.count == 2,
+                       let n = Int(parts[0].trimmingCharacters(in: .whitespaces)),
+                       let f = parseLambda(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) {
+                        pattern = pattern.every(n, f)
+                    } else {
+                        print("[CodeParser] 'every' could not parse args: \(arg)")
+                    }
+                }
+
+            case "sometimes":
+                if let arg = token.arg,
+                   let f = parseLambda(arg.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    pattern = pattern.sometimes(f)
+                } else {
+                    print("[CodeParser] 'sometimes' could not parse lambda arg")
+                }
+
+            case "often":
+                if let arg = token.arg,
+                   let f = parseLambda(arg.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    pattern = pattern.often(f)
+                } else {
+                    print("[CodeParser] 'often' could not parse lambda arg")
+                }
+
+            case "rarely":
+                if let arg = token.arg,
+                   let f = parseLambda(arg.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    pattern = pattern.rarely(f)
+                } else {
+                    print("[CodeParser] 'rarely' could not parse lambda arg")
+                }
+
+            case "off":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    if parts.count == 2,
+                       let t = Double(parts[0].trimmingCharacters(in: .whitespaces)),
+                       let f = parseLambda(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) {
+                        pattern = pattern.off(t, f)
+                    } else {
+                        print("[CodeParser] 'off' could not parse args: \(arg)")
+                    }
+                }
+
+            case "jux":
+                if let arg = token.arg,
+                   let f = parseLambda(arg.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    pattern = pattern.jux(f)
+                } else {
+                    print("[CodeParser] 'jux' could not parse lambda arg")
+                }
+
+            case "struct":
+                if let arg = token.arg {
+                    let t = unquote(arg.trimmingCharacters(in: .whitespaces))
+                    pattern = pattern.structGate(t)
+                }
+
             default:
                 break
             }
         }
 
         return pattern
+    }
+
+    // MARK: - Lambda parser
+    // Parses: `x => x.method(args)` or `x => x.m1(a).m2(b)...`
+    // Supports only methods already known to CodeParser (applied to the input pattern).
+    // Returns nil if the lambda cannot be parsed.
+
+    private func parseLambda(_ s: String) -> ((ControlPattern) -> ControlPattern)? {
+        // Expect: identifier WS* => WS* identifier(.method chain)
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Find the arrow =>
+        guard let arrowRange = trimmed.range(of: "=>") else { return nil }
+
+        let paramPart = trimmed[..<arrowRange.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyPart  = trimmed[arrowRange.upperBound...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Validate param is a simple identifier
+        guard !paramPart.isEmpty,
+              paramPart.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else {
+            return nil
+        }
+        let paramName = paramPart
+
+        // Body must start with `paramName.` or just be `paramName`
+        var chainStr = bodyPart
+        if chainStr.hasPrefix(paramName + ".") {
+            chainStr = String(chainStr.dropFirst(paramName.count + 1))
+        } else if chainStr == paramName {
+            // identity lambda: x => x
+            return { $0 }
+        } else {
+            return nil
+        }
+
+        // Parse the method chain on chainStr and turn it into a ControlPattern transform
+        guard let tokens = try? parseMethodChain("dummy." + chainStr) else { return nil }
+        // Drop the dummy token
+        let methodTokens = tokens.dropFirst()
+
+        // Build a transform function
+        return { (pat: ControlPattern) -> ControlPattern in
+            var result = pat
+            for token in methodTokens {
+                switch token.name {
+                case "slow":
+                    if let arg = token.arg, let v = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                        result = result.slow(v)
+                    }
+                case "fast":
+                    if let arg = token.arg, let v = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                        result = result.fast(v)
+                    }
+                case "gain":
+                    if let arg = token.arg {
+                        let t = arg.trimmingCharacters(in: .whitespaces)
+                        if let v = Double(t) { result = result.gain(v) }
+                        else                 { result = result.gain(unquote(t)) }
+                    }
+                case "room":
+                    if let arg = token.arg {
+                        let t = arg.trimmingCharacters(in: .whitespaces)
+                        if let v = Double(t) { result = result.room(v) }
+                        else                 { result = result.room(unquote(t)) }
+                    }
+                case "cutoff":
+                    if let arg = token.arg {
+                        let t = arg.trimmingCharacters(in: .whitespaces)
+                        if let v = Double(t) { result = result.cutoff(v) }
+                        else                 { result = result.cutoff(unquote(t)) }
+                    }
+                case "pan":
+                    if let arg = token.arg {
+                        let t = arg.trimmingCharacters(in: .whitespaces)
+                        if let v = Double(t) { result = result.pan(v) }
+                        else                 { result = result.pan(unquote(t)) }
+                    }
+                case "delay":
+                    if let arg = token.arg {
+                        let t = arg.trimmingCharacters(in: .whitespaces)
+                        if let v = Double(t) { result = result.delay(v) }
+                    }
+                case "rev":
+                    result = result.rev
+                case "ply":
+                    if let arg = token.arg, let v = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                        result = result.ply(v)
+                    }
+                default:
+                    print("[CodeParser] Lambda: unknown method '\(token.name)' — skipping")
+                }
+            }
+            return result
+        }
     }
 
     // MARK: - Method chain tokenizer
