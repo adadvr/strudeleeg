@@ -26,8 +26,12 @@ const FIXTURE_DIR = path.join(ROOT, 'MiniEngine', 'Tests', 'MiniEngineTests', 'F
 
 // ── Import Strudel public API ────────────────────────────────────────────────
 const corePath = pathToFileURL(path.join(WEB_MODS, '@strudel/core/pattern.mjs')).href;
-const { pure, stack, fastcat, slowcat, silence: _sil } = await import(corePath);
+const { pure, stack, fastcat, slowcat, silence: _sil, timecat } = await import(corePath);
 const strudelSilence = _sil;
+
+// ── Import euclid from @strudel/core ────────────────────────────────────────
+const euclidPath = pathToFileURL(path.join(WEB_MODS, '@strudel/core/euclid.mjs')).href;
+const { euclid, euclidRot } = await import(euclidPath);
 
 // ── Fraction → "n/d" string ──────────────────────────────────────────────────
 function fracToString(f) {
@@ -163,6 +167,138 @@ const CASES = [
         .set(pure({ gain: 0.7 }));
 
       return stack(pad, bell);
+    },
+  },
+
+  // ── Tier 1: mini-notation * (fast) ─────────────────────────────────────────
+  {
+    // "pad*2 bell" → 2 steps: [pad fast(2), bell]
+    // pad*2 means pad repeats twice within its slot = fast(2) on that step
+    // Sequence has 2 top-level steps, each 1/2 cycle.
+    // pad*2: within [0, 1/2) plays pad twice → events at [0,1/4) and [1/4,1/2)
+    // bell: [1/2, 1)
+    label: 's("pad*2 bell")',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({ s: 'pad' }).fast(2), pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: mini-notation ! (replicate) ────────────────────────────────────
+  {
+    // "pad!2 bell" → expand to 3 equal steps: [pad, pad, bell]
+    // !2 replicates "pad" as 2 equal steps; then bell = 1 step. Total 3 steps.
+    label: 's("pad!2 bell")',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({ s: 'pad' }), pure({ s: 'pad' }), pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: mini-notation @ (weight) ───────────────────────────────────────
+  {
+    // "pad@3 bell" → pad weight=3, bell weight=1. Total=4.
+    // pad: [0, 3/4), bell: [3/4, 1)
+    label: 's("pad@3 bell")',
+    spanCycles: 1,
+    build() {
+      return timecat([3, pure({ s: 'pad' })], [1, pure({ s: 'bell' })]);
+    },
+  },
+
+  // ── Tier 1: mini-notation * inside group ───────────────────────────────────
+  {
+    // "[pad*2 bell] hi" → group first, then hi. 2 top-level steps.
+    // Group [pad*2 bell] = fastcat(pad.fast(2), bell) in slot [0,1/2)
+    // hi = [1/2, 1)
+    label: 's("[pad*2 bell] hi")',
+    spanCycles: 1,
+    build() {
+      const group = fastcat(pure({ s: 'pad' }).fast(2), pure({ s: 'bell' }));
+      return fastcat(group, pure({ s: 'hi' }));
+    },
+  },
+
+  // ── Tier 1: euclid(3,8) ────────────────────────────────────────────────────
+  {
+    label: 's("bell").euclid(3,8)',
+    spanCycles: 1,
+    build() {
+      return euclid(3, 8, pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: euclid(2,5) ────────────────────────────────────────────────────
+  {
+    label: 's("bell").euclid(2,5)',
+    spanCycles: 1,
+    build() {
+      return euclid(2, 5, pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: euclid(5,8) ────────────────────────────────────────────────────
+  {
+    label: 's("bell").euclid(5,8)',
+    spanCycles: 1,
+    build() {
+      return euclid(5, 8, pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: euclid(3,8,2) rotation ────────────────────────────────────────
+  {
+    label: 's("bell").euclid(3,8,2)',
+    spanCycles: 1,
+    build() {
+      return euclidRot(3, 8, 2, pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: pan ─────────────────────────────────────────────────────────────
+  {
+    label: 's("pad").pan(0.25)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'pad' }).set(pure({ pan: 0.25 }));
+    },
+  },
+
+  // ── Tier 1: n() + scale → note MIDI ────────────────────────────────────────
+  // n("0 2 4") + scale("C:minor")
+  // C natural minor (aeolian) from C3 = MIDI 48:
+  // intervals: [0, 2, 3, 5, 7, 8, 10]
+  // n(0)=48, n(2)=51, n(4)=55
+  {
+    label: 'n("0 2 4").scale("C:minor").s("bell")',
+    spanCycles: 1,
+    build() {
+      // n(0)=C3=48, n(2)=Eb3=51, n(4)=G3=55
+      const notePat = fastcat(pure({ note: 48 }), pure({ note: 51 }), pure({ note: 55 }));
+      return notePat.set(pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: n() negative and >7 wrapping ───────────────────────────────────
+  {
+    label: 'n("-1 7 8").scale("C:minor").s("bell")',
+    spanCycles: 1,
+    build() {
+      // n(-1)=Bb2=46, n(7)=C4=60, n(8)=D4=62
+      const notePat = fastcat(pure({ note: 46 }), pure({ note: 60 }), pure({ note: 62 }));
+      return notePat.set(pure({ s: 'bell' }));
+    },
+  },
+
+  // ── Tier 1: delay parameters (pattern level only — no audio-engine test) ───
+  {
+    label: 's("pad").delay(0.5).delaytime(0.3).delayfeedback(0.6)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'pad' })
+        .set(pure({ delay: 0.5 }))
+        .set(pure({ delaytime: 0.3 }))
+        .set(pure({ delayfeedback: 0.6 }));
     },
   },
 ];

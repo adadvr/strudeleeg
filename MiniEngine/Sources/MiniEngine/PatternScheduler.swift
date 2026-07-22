@@ -35,17 +35,23 @@ private final class LayerGroup {
     let varispeed: AVAudioUnitVarispeed
     let eq:        AVAudioUnitEQ
     let reverb:    AVAudioUnitReverb
+    let delay:     AVAudioUnitDelay
+    let panner:    AVAudioMixerNode   // per-layer panner (pan property)
 
     init(sampleName: String,
          player:    AVAudioPlayerNode,
          varispeed: AVAudioUnitVarispeed,
          eq:        AVAudioUnitEQ,
-         reverb:    AVAudioUnitReverb) {
+         reverb:    AVAudioUnitReverb,
+         delay:     AVAudioUnitDelay,
+         panner:    AVAudioMixerNode) {
         self.sampleName = sampleName
         self.player     = player
         self.varispeed  = varispeed
         self.eq         = eq
         self.reverb     = reverb
+        self.delay      = delay
+        self.panner     = panner
     }
 }
 
@@ -55,8 +61,10 @@ public final class PatternScheduler {
 
     // MARK: - Constants
 
-    /// Tempo: 0.5 cps → 1 cycle = 2 s. (Phase 1 will add setcps.)
-    public private(set) var cycleSeconds: Double = 2.0
+    /// Tempo: cycles-per-second. Default 0.5 cps → 1 cycle = 2 s.
+    /// Change via setcps() / setcpm() before or during playback.
+    public private(set) var cps: Double = 0.5
+    public var cycleSeconds: Double { 1.0 / cps }
     private static let lookahead: Double = 0.4      // seconds
     private static let timerInterval: Double = 0.1  // seconds
 
@@ -81,6 +89,18 @@ public final class PatternScheduler {
     public init(audioEngine: AVAudioEngine, sampleURLs: [String: URL]) {
         self.audioEngine = audioEngine
         self.sampleURLs  = sampleURLs
+    }
+
+    // MARK: - Tempo control
+
+    /// Set tempo in cycles-per-second. Default is 0.5 (1 cycle = 2 seconds).
+    public func setcps(_ value: Double) {
+        cps = max(0.0001, value)
+    }
+
+    /// Set tempo in cycles-per-minute. Equivalent to setcps(value / 60).
+    public func setcpm(_ value: Double) {
+        setcps(value / 60.0)
     }
 
     // MARK: - Public API
@@ -141,6 +161,8 @@ public final class PatternScheduler {
             audioEngine.detach(group.varispeed)
             audioEngine.detach(group.eq)
             audioEngine.detach(group.reverb)
+            audioEngine.detach(group.delay)
+            audioEngine.detach(group.panner)
         }
         groups = [:]
 
@@ -185,29 +207,41 @@ public final class PatternScheduler {
             guard absoluteTime >= windowStart, absoluteTime < windowEnd else { continue }
             guard absoluteTime >= startHostTime else { continue }
 
-            let midiNote  = hap.value["note"]?.doubleValue.map { Int($0) } ?? nil
-            let gainValue = hap.value["gain"]?.doubleValue ?? 1.0
-            let roomValue = hap.value["room"]?.doubleValue
-            let cutoffValue = hap.value["cutoff"]?.doubleValue
+            let midiNote      = hap.value["note"]?.doubleValue.map { Int($0) } ?? nil
+            let gainValue     = hap.value["gain"]?.doubleValue ?? 1.0
+            let roomValue     = hap.value["room"]?.doubleValue
+            let cutoffValue   = hap.value["cutoff"]?.doubleValue
+            let panValue      = hap.value["pan"]?.doubleValue
+            let delayValue    = hap.value["delay"]?.doubleValue
+            let delayTimeVal  = hap.value["delaytime"]?.doubleValue
+            let delayFeedVal  = hap.value["delayfeedback"]?.doubleValue
 
             dispatchHap(
-                sampleName:   sampleName,
-                midiNote:     midiNote,
-                gain:         gainValue,
-                room:         roomValue,
-                cutoff:       cutoffValue,
-                absoluteTime: absoluteTime
+                sampleName:    sampleName,
+                midiNote:      midiNote,
+                gain:          gainValue,
+                room:          roomValue,
+                cutoff:        cutoffValue,
+                pan:           panValue,
+                delay:         delayValue,
+                delaytime:     delayTimeVal,
+                delayfeedback: delayFeedVal,
+                absoluteTime:  absoluteTime
             )
         }
     }
 
     private func dispatchHap(
-        sampleName:   String,
-        midiNote:     Int?,
-        gain:         Double,
-        room:         Double?,
-        cutoff:       Double?,
-        absoluteTime: Double
+        sampleName:    String,
+        midiNote:      Int?,
+        gain:          Double,
+        room:          Double?,
+        cutoff:        Double?,
+        pan:           Double?,
+        delay:         Double?,
+        delaytime:     Double?,
+        delayfeedback: Double?,
+        absoluteTime:  Double
     ) {
         // Lazily create a group for this sample if needed
         if groups[sampleName] == nil {
@@ -236,6 +270,12 @@ public final class PatternScheduler {
         // Apply per-event gain
         group.player.volume = Float(gain)
 
+        // Apply pan: Strudel 0..1 → AVAudioMixerNode.pan -1..1
+        if let p = pan {
+            let avPan = Float(p * 2.0 - 1.0)  // 0→-1, 0.5→0, 1→1
+            group.panner.pan = avPan
+        }
+
         // Apply per-chain room/cutoff (compromise: see doc above)
         if let r = room {
             group.reverb.wetDryMix = Float(r * 100)
@@ -243,6 +283,14 @@ public final class PatternScheduler {
         if let c = cutoff {
             group.eq.bands[0].frequency = Float(c)
             group.eq.bands[0].bypass    = false
+        }
+
+        // Apply delay (wet mix 0..1 → wetDryMix 0..100).
+        // Defaults if delay set but delaytime/delayfeedback not: 0.25s / 0.5 feedback.
+        if let d = delay {
+            group.delay.wetDryMix  = Float(d * 100)
+            group.delay.delayTime  = delaytime ?? 0.25
+            group.delay.feedback   = Float((delayfeedback ?? 0.5) * 100)
         }
 
         group.varispeed.rate = rate
@@ -261,6 +309,8 @@ public final class PatternScheduler {
             let varispeed = AVAudioUnitVarispeed()
             let eq        = AVAudioUnitEQ(numberOfBands: 1)
             let reverb    = AVAudioUnitReverb()
+            let delay     = AVAudioUnitDelay()
+            let panner    = AVAudioMixerNode()
 
             // Configure EQ as low-pass, bypassed by default
             let band = eq.bands[0]
@@ -272,23 +322,38 @@ public final class PatternScheduler {
             reverb.loadFactoryPreset(.mediumHall)
             reverb.wetDryMix = 0
 
+            // Configure delay: off by default; sensible defaults ready to use
+            delay.wetDryMix = 0        // dry by default; pan enables it
+            delay.delayTime = 0.25     // 250 ms default echo time
+            delay.feedback  = 50       // 50% feedback
+            delay.lowPassCutoff = 15_000  // subtle high-freq damping
+
+            // Panner: center by default (0 = center in AVAudioMixerNode pan scale -1..1)
+            panner.pan = 0
+
             audioEngine.attach(player)
             audioEngine.attach(varispeed)
             audioEngine.attach(eq)
             audioEngine.attach(reverb)
+            audioEngine.attach(delay)
+            audioEngine.attach(panner)
 
-            // Chain: player → varispeed → eq → reverb → mainMixer
+            // Chain: player → varispeed → eq → reverb → delay → panner → mainMixer
             audioEngine.connect(player,    to: varispeed, format: nil)
             audioEngine.connect(varispeed, to: eq,        format: nil)
             audioEngine.connect(eq,        to: reverb,    format: nil)
-            audioEngine.connect(reverb,    to: mainMixer, format: nil)
+            audioEngine.connect(reverb,    to: delay,     format: nil)
+            audioEngine.connect(delay,     to: panner,    format: nil)
+            audioEngine.connect(panner,    to: mainMixer, format: nil)
 
             let group = LayerGroup(
                 sampleName: name,
                 player:     player,
                 varispeed:  varispeed,
                 eq:         eq,
-                reverb:     reverb
+                reverb:     reverb,
+                delay:      delay,
+                panner:     panner
             )
             groups[name] = group
 

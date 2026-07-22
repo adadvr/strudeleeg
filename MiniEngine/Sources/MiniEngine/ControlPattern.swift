@@ -107,12 +107,77 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["cutoff": .double(Double($0) ?? 20000.0)] })
     }
 
+    public func pan(_ value: Double) -> ControlPattern {
+        withControl(.pure(["pan": .double(value)]))
+    }
+
+    public func pan(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["pan": .double(Double($0) ?? 0.5)] })
+    }
+
     public func s(_ pattern: String) -> ControlPattern {
         withControl(parseMini(pattern).map { ["s": .string($0)] })
     }
 
     public func note(_ pattern: String) -> ControlPattern {
         withControl(notePattern(pattern))
+    }
+
+    // MARK: - Delay controls
+
+    public func delay(_ value: Double) -> ControlPattern {
+        withControl(.pure(["delay": .double(value)]))
+    }
+
+    public func delay(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["delay": .double(Double($0) ?? 0.0)] })
+    }
+
+    public func delaytime(_ value: Double) -> ControlPattern {
+        withControl(.pure(["delaytime": .double(value)]))
+    }
+
+    public func delaytime(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["delaytime": .double(Double($0) ?? 0.25)] })
+    }
+
+    public func delayfeedback(_ value: Double) -> ControlPattern {
+        withControl(.pure(["delayfeedback": .double(value)]))
+    }
+
+    public func delayfeedback(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["delayfeedback": .double(Double($0) ?? 0.5)] })
+    }
+
+    // MARK: - Scale / n
+
+    public func n(_ pattern: String) -> ControlPattern {
+        withControl(nPattern(pattern))
+    }
+
+    public func scale(_ value: String) -> ControlPattern {
+        withControl(.pure(["scale": .string(value)])).resolveScale()
+    }
+
+    /// Resolve any hap that has both "n" and "scale" fields into a "note" (MIDI).
+    /// After resolution, "n" and "scale" fields are removed and replaced with "note".
+    public func resolveScale() -> ControlPattern {
+        Pattern { span in
+            self.query(span).map { hap in
+                guard let scaleStr = hap.value["scale"]?.stringValue,
+                      let nVal = hap.value["n"]?.doubleValue,
+                      let (root, intervals) = parseScale(scaleStr) else {
+                    return hap
+                }
+                let idx = Int(nVal.rounded())
+                let midi = scaleDegreeToMidi(index: idx, root: root, intervals: intervals)
+                var newValue = hap.value
+                newValue["note"] = .double(Double(midi))
+                newValue.removeValue(forKey: "n")
+                newValue.removeValue(forKey: "scale")
+                return Hap(whole: hap.whole, part: hap.part, value: newValue)
+            }
+        }
     }
 }
 
@@ -149,6 +214,75 @@ func notePattern(_ notation: String) -> ControlPattern {
 }
 
 // MARK: - stack overload for ControlPattern
+
+/// Top-level pan constructor
+public func pan(_ miniNotation: String) -> ControlPattern {
+    parseMini(miniNotation).map { ["pan": .double(Double($0) ?? 0.5)] }
+}
+
+// MARK: - n() helper
+
+/// Parse n mini-notation and produce {"n": double} control map.
+func nPattern(_ notation: String) -> ControlPattern {
+    parseMini(notation).map { token -> [String: ControlValue] in
+        if let v = Double(token) {
+            return ["n": .double(v)]
+        }
+        return ["n": .string(token)]
+    }
+}
+
+/// Top-level n constructor
+public func n(_ miniNotation: String) -> ControlPattern {
+    nPattern(miniNotation)
+}
+
+// MARK: - scale() helper — resolves n+scale to MIDI note
+
+/// Scale definitions: maps scale name → intervals from root (semitones, repeating per octave).
+/// Documented: these are the intervals for one octave; index wraps with octave shifts.
+private let scaleIntervals: [String: [Int]] = [
+    "major":       [0, 2, 4, 5, 7, 9, 11],
+    "minor":       [0, 2, 3, 5, 7, 8, 10],   // natural minor
+    "dorian":      [0, 2, 3, 5, 7, 9, 10],
+    "mixolydian":  [0, 2, 4, 5, 7, 9, 10],
+    "pentatonic":  [0, 2, 4, 7, 9],
+]
+
+/// Root note names → MIDI number for octave 3 (Strudel default: C3 = MIDI 48).
+/// Verified against oracle: n(0).scale("C:minor") → MIDI 48.
+private let rootMidi: [String: Int] = [
+    "C": 48, "C#": 49, "Db": 49,
+    "D": 50, "D#": 51, "Eb": 51,
+    "E": 52,
+    "F": 53, "F#": 54, "Gb": 54,
+    "G": 55, "G#": 56, "Ab": 56,
+    "A": 57, "A#": 58, "Bb": 58,
+    "B": 59,
+]
+
+/// Parse "Root:scalename" → (rootMidi, intervals).
+public func parseScale(_ scaleStr: String) -> (Int, [Int])? {
+    let parts = scaleStr.split(separator: ":", maxSplits: 1)
+    guard parts.count == 2 else { return nil }
+    let rootStr = String(parts[0]).trimmingCharacters(in: .whitespaces)
+    let scaleName = String(parts[1]).trimmingCharacters(in: .whitespaces).lowercased()
+    guard let root = rootMidi[rootStr],
+          let intervals = scaleIntervals[scaleName] else { return nil }
+    return (root, intervals)
+}
+
+/// Convert scale degree index → MIDI note.
+/// Negative indices and indices beyond the octave wrap correctly.
+public func scaleDegreeToMidi(index: Int, root: Int, intervals: [Int]) -> Int {
+    let stepsPerOctave = intervals.count
+    // Wrap index to [0, stepsPerOctave) and compute octave shift
+    let octaveShift = index >= 0
+        ? index / stepsPerOctave
+        : (index - stepsPerOctave + 1) / stepsPerOctave
+    let wrappedIdx = ((index % stepsPerOctave) + stepsPerOctave) % stepsPerOctave
+    return root + 12 * octaveShift + intervals[wrappedIdx]
+}
 
 /// stack for ControlPatterns — calls the generic Pattern stack.
 /// We cast to the base type first to avoid ambiguous dispatch to this overload.

@@ -2,9 +2,16 @@
 // CodeParser — parses the top-level Strudel-like editor code into a ControlPattern.
 //
 // Supports:
+//   setcps(x) / setcpm(x)  — top-level tempo statement (applied to scheduler)
 //   stack(expr, expr, ...)
 //   s("mini") .note("mini") .slow(n) .fast(n) .gain(n|"mini") .room(n) .cutoff(n)
+//   .pan(n|"mini")  — stereo position 0..1
+//   .delay(n) .delaytime(n) .delayfeedback(n)  — echo effect
+//   .euclid(k,n) / .euclid(k,n,rot)  — Euclidean rhythm
+//   n("mini") + .scale("Root:name")  — scale-based melody
 //   // line comments (stripped before parsing)
+//
+// Unknown methods produce a friendly warning (not a hard error).
 // ---------------------------------------------------------------------------
 
 import Foundation
@@ -21,36 +28,87 @@ public enum CodeParseError: Error, LocalizedError {
     }
 }
 
+/// Result of parsing a code block: the pattern plus any top-level tempo setting.
+public struct ParseResult {
+    public let pattern: ControlPattern
+    /// Cycles-per-second if setcps/setcpm appeared in the code, else nil.
+    public let cps: Double?
+}
+
 public struct CodeParser {
 
     public init() {}
 
+    // MARK: - Public API
+
     /// Parse a full code string and return a ControlPattern.
+    /// setcps/setcpm statements are parsed and discarded (use parseWithTempo to get cps).
     public func parse(_ rawCode: String) throws -> ControlPattern {
-        let code = stripLineComments(rawCode)
+        try parseWithTempo(rawCode).pattern
+    }
+
+    /// Parse code and also return the tempo (cps) if setcps/setcpm was specified.
+    public func parseWithTempo(_ rawCode: String) throws -> ParseResult {
+        let lines = rawCode.components(separatedBy: .newlines)
+
+        var cps: Double? = nil
+        var patternLines: [String] = []
+
+        for line in lines {
+            let stripped = stripLineCommentsFromLine(line)
+            let trimmed  = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if trimmed.isEmpty { continue }
+
+            // Detect setcps(x) or setcpm(x) as standalone statement
+            if trimmed.hasPrefix("setcps(") {
+                if let inner = extractSimpleArg(trimmed, fn: "setcps"),
+                   let v = Double(inner.trimmingCharacters(in: .whitespaces)) {
+                    cps = v
+                }
+                continue
+            }
+            if trimmed.hasPrefix("setcpm(") {
+                if let inner = extractSimpleArg(trimmed, fn: "setcpm"),
+                   let v = Double(inner.trimmingCharacters(in: .whitespaces)) {
+                    cps = v / 60.0
+                }
+                continue
+            }
+
+            patternLines.append(stripped)
+        }
+
+        let code = patternLines.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        guard !code.isEmpty else {
+            return ParseResult(pattern: .silence, cps: cps)
+        }
+
+        let pattern: ControlPattern
         if code.hasPrefix("stack(") {
             let inner = try extractArgs(code, function: "stack")
             let parts = splitTopLevelCommas(inner)
             let layers = try parts.map { try parseLayerExpr($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            return stackCP(layers)
+            pattern = stackCP(layers)
         } else {
-            return try parseLayerExpr(code)
+            pattern = try parseLayerExpr(code)
         }
+
+        return ParseResult(pattern: pattern, cps: cps)
     }
 
     // MARK: - Comment stripping
 
-    /// Remove // ... end-of-line comments, but not inside quoted strings.
-    private func stripLineComments(_ code: String) -> String {
+    private func stripLineCommentsFromLine(_ line: String) -> String {
         var result: [Character] = []
         var inString = false
-        var i = code.startIndex
+        var i = line.startIndex
 
-        while i < code.endIndex {
-            let ch = code[i]
-            let next = code.index(after: i)
+        while i < line.endIndex {
+            let ch = line[i]
+            let next = line.index(after: i)
 
             if ch == "\"" {
                 inString.toggle()
@@ -59,14 +117,8 @@ public struct CodeParser {
                 continue
             }
 
-            if !inString && ch == "/" && next < code.endIndex && code[next] == "/" {
-                // Skip to end of line
-                var j = next
-                while j < code.endIndex && code[j] != "\n" {
-                    j = code.index(after: j)
-                }
-                i = j
-                continue
+            if !inString && ch == "/" && next < line.endIndex && line[next] == "/" {
+                break  // rest of line is comment
             }
 
             result.append(ch)
@@ -77,9 +129,25 @@ public struct CodeParser {
 
     // MARK: - Layer expression parser
 
-    /// Parse a single layer expression like:
-    ///   s("pad").slow(4).gain(0.5).room(0.6)
-    ///   note("<c4 e4 g4 b4>").s("bell").slow(2).cutoff(1500).room(0.4).gain(0.7)
+    private let knownMethods: Set<String> = [
+        "s", "note", "n", "scale",
+        "slow", "fast",
+        "gain", "room", "cutoff",
+        "pan",
+        "delay", "delaytime", "delayfeedback",
+        "euclid",
+        "stack"
+    ]
+
+    private let friendlyUnknown: Set<String> = [
+        "rev", "ply", "every", "sometimes", "often", "rarely",
+        "off", "jux", "struct",
+        "shape", "distort", "chorus", "phaser",
+        "chop", "striate", "crush", "vowel",
+        "speed", "attack", "decay", "sustain", "release",
+        "lpf", "hpf", "resonance"
+    ]
+
     private func parseLayerExpr(_ expr: String) throws -> ControlPattern {
         let chain = try parseMethodChain(expr)
 
@@ -87,71 +155,117 @@ public struct CodeParser {
             throw CodeParseError.syntaxError("Empty expression")
         }
 
-        let supportedMethods: Set<String> = ["s", "note", "slow", "fast", "gain", "room", "cutoff", "stack"]
-        for token in chain where !supportedMethods.contains(token.name) {
-            // For now, warn and skip unknown methods rather than hard-fail
-            // (facilitates forward-compatibility)
+        // Warn about unrecognised methods instead of hard-failing
+        for token in chain where !knownMethods.contains(token.name) {
+            if friendlyUnknown.contains(token.name) {
+                print("[CodeParser] '\(token.name)' is not yet supported — skipping.")
+            }
         }
 
-        // Determine the base pattern (s or note)
+        // ── Determine the base pattern ──────────────────────────────────────
         var base: ControlPattern?
 
+        // s("...") as standalone or in chain
         if let sToken = chain.first(where: { $0.name == "s" }), let sArg = sToken.arg {
             base = s(unquote(sArg))
         }
 
+        // note("...")
         if let noteToken = chain.first(where: { $0.name == "note" }), let noteArg = noteToken.arg {
             let notePat = note(unquote(noteArg))
-            if let existing = base {
-                base = existing.withControl(notePat)
-            } else {
-                base = notePat
-            }
+            base = base?.withControl(notePat) ?? notePat
+        }
+
+        // n("...") — scale-degree indices
+        if let nToken = chain.first(where: { $0.name == "n" }), let nArg = nToken.arg {
+            let nPat = n(unquote(nArg))
+            base = base?.withControl(nPat) ?? nPat
         }
 
         guard var pattern = base else {
-            throw CodeParseError.syntaxError("Layer must start with s(...) or note(...): \(expr)")
+            throw CodeParseError.syntaxError("Layer must start with s(...), note(...), or n(...): \(expr)")
         }
 
-        // Apply timing modifiers
+        // ── Timing modifiers ────────────────────────────────────────────────
         if let slowToken = chain.first(where: { $0.name == "slow" }),
-           let arg = slowToken.arg, let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
+           let arg = slowToken.arg,
+           let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
             pattern = pattern.slow(factor)
         } else if let fastToken = chain.first(where: { $0.name == "fast" }),
-                  let arg = fastToken.arg, let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                  let arg = fastToken.arg,
+                  let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
             pattern = pattern.fast(factor)
         }
 
-        // Apply effect controls
+        // ── Effect / control modifiers (in chain order) ─────────────────────
         for token in chain {
             switch token.name {
+
             case "gain":
                 if let arg = token.arg {
-                    let trimmed = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(trimmed) {
-                        pattern = pattern.gain(v)
-                    } else {
-                        pattern = pattern.gain(unquote(trimmed))
-                    }
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.gain(v) }
+                    else                 { pattern = pattern.gain(unquote(t)) }
                 }
+
             case "room":
                 if let arg = token.arg {
-                    let trimmed = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(trimmed) {
-                        pattern = pattern.room(v)
-                    } else {
-                        pattern = pattern.room(unquote(trimmed))
-                    }
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.room(v) }
+                    else                 { pattern = pattern.room(unquote(t)) }
                 }
+
             case "cutoff":
                 if let arg = token.arg {
-                    let trimmed = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(trimmed) {
-                        pattern = pattern.cutoff(v)
-                    } else {
-                        pattern = pattern.cutoff(unquote(trimmed))
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.cutoff(v) }
+                    else                 { pattern = pattern.cutoff(unquote(t)) }
+                }
+
+            case "pan":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.pan(v) }
+                    else                 { pattern = pattern.pan(unquote(t)) }
+                }
+
+            case "delay":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.delay(v) }
+                    else                 { pattern = pattern.delay(unquote(t)) }
+                }
+
+            case "delaytime":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.delaytime(v) }
+                    else                 { pattern = pattern.delaytime(unquote(t)) }
+                }
+
+            case "delayfeedback":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.delayfeedback(v) }
+                    else                 { pattern = pattern.delayfeedback(unquote(t)) }
+                }
+
+            case "euclid":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    let nums = parts.compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                    if nums.count >= 2 {
+                        let rot = nums.count >= 3 ? nums[2] : 0
+                        pattern = pattern.euclid(nums[0], nums[1], rot)
                     }
                 }
+
+            case "scale":
+                if let arg = token.arg {
+                    let t = unquote(arg.trimmingCharacters(in: .whitespaces))
+                    pattern = pattern.scale(t)
+                }
+
             default:
                 break
             }
@@ -224,6 +338,14 @@ public struct CodeParser {
     }
 
     // MARK: - Helpers
+
+    private func extractSimpleArg(_ code: String, fn: String) -> String? {
+        let prefix = "\(fn)("
+        guard code.hasPrefix(prefix) else { return nil }
+        let rest = String(code.dropFirst(prefix.count))
+        guard let paren = rest.firstIndex(of: ")") else { return nil }
+        return String(rest[..<paren])
+    }
 
     private func extractArgs(_ code: String, function fn: String) throws -> String {
         let prefix = "\(fn)("
