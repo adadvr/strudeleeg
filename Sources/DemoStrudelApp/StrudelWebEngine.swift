@@ -140,7 +140,7 @@ final class StrudelWebEngine: NSObject, @preconcurrency AudioDemoEngine, WKNavig
 
     func stop() {
         guard let wv = webView else { return }
-        wv.evaluateJavaScript("window.strudelStop();") { _, _ in }
+        wv.evaluateJavaScript("window.strudelStop(); undefined;") { _, _ in }
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -150,9 +150,14 @@ final class StrudelWebEngine: NSObject, @preconcurrency AudioDemoEngine, WKNavig
             onError?("StrudelWebEngine: failed to JSON-encode code")
             return
         }
-        let js = "window.strudelPlay(\(encoded));"
+        // Termina en `undefined`: strudelPlay es async y devuelve una Promise,
+        // que evaluateJavaScript no puede serializar y reporta como error falso.
+        // Los errores reales llegan por el message handler "strudelError".
+        let js = "window.strudelPlay(\(encoded)); undefined;"
         wv.evaluateJavaScript(js) { [weak self] _, error in
-            if let error = error {
+            if let error = error as NSError?,
+               !(error.domain == WKError.errorDomain
+                 && error.code == WKError.javaScriptResultTypeIsUnsupported.rawValue) {
                 Task { @MainActor in
                     self?.onError?("JS error: \(error.localizedDescription)")
                 }
