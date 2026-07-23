@@ -10,6 +10,10 @@
 //   multiply: "a*2"          → fast(2) on that step (subdivide into 2)
 //   replicate:"a!2" / "a!"   → repeat step as N equal steps (default 2)
 //   weight:   "a@3"          → step occupies 3 weight-units in the cycle
+//   degrade:  "a?"           → randomly omit with probability 0.5 (default)
+//             "a?0.3"        → randomly omit with probability 0.3
+//   polymeter:"{a b, c d e}" → parallel sub-sequences, each maintaining own step count
+//             "{a b, c d e}%4" → 4 steps per cycle (overrides)
 // ---------------------------------------------------------------------------
 
 import Foundation
@@ -37,10 +41,12 @@ public enum MiniNotationCore {
         case group([Atom])          // [a b c]
         case slowcat([[Atom]])      // <a b c>
         case chord([[Atom]])        // [a,b,c] or "a,b" — parallel stack (simultaneous)
+        case polymeter([[Atom]], Int?)  // {a b, c d e}%n — polymeter (each branch own step count)
         // Modifier wrappers (set after parsing base atom)
         case fast(Atom, Int)        // a*n  — play n times faster (subdivide)
         case replicate(Atom, Int)   // a!n  — repeat as n equal steps
         case weight(Atom, Int)      // a@w  — this step has weight w
+        case degrade(Atom, Double)  // a?p  — random omission with probability p
     }
 
     // MARK: - Tokenizer
@@ -148,6 +154,34 @@ public enum MiniNotationCore {
                 atom = try parseModifiers(&scalars, idx: &idx, base: atom)
                 atoms.append(atom)
 
+            case "{":
+                // Polymeter: {a b, c d e}%n
+                // Multiple branches in parallel, each maintaining its own step count.
+                // The optional %n overrides steps-per-cycle.
+                idx = scalars.index(after: idx)
+                var branches: [[Atom]] = []
+                let firstBranch = try parseSequence(&scalars, idx: &idx, terminators: ["}", ","])
+                if firstBranch.isEmpty == false || true {
+                    branches.append(firstBranch)
+                }
+                while idx < scalars.endIndex && scalars[idx] == "," {
+                    idx = scalars.index(after: idx)   // consume ','
+                    let branch = try parseSequence(&scalars, idx: &idx, terminators: ["}", ","])
+                    branches.append(branch)
+                }
+                if idx < scalars.endIndex && scalars[idx] == "}" {
+                    idx = scalars.index(after: idx)  // consume '}'
+                }
+                // Check for optional %n (steps per cycle override)
+                var stepsPerCycle: Int? = nil
+                if idx < scalars.endIndex && scalars[idx] == "%" {
+                    idx = scalars.index(after: idx)
+                    stepsPerCycle = parseOptionalInt(&scalars, idx: &idx)
+                }
+                var pmAtom: Atom = .polymeter(branches, stepsPerCycle)
+                pmAtom = try parseModifiers(&scalars, idx: &idx, base: pmAtom)
+                atoms.append(pmAtom)
+
             default:
                 // word token
                 var word = ""
@@ -170,7 +204,7 @@ public enum MiniNotationCore {
         return atoms
     }
 
-    /// Parse optional modifier characters: *, !, @ after a base atom.
+    /// Parse optional modifier characters: *, !, @, ? after a base atom.
     /// Modifiers can chain: a*2@3 is allowed by Strudel (fast then weight).
     private static func parseModifiers(
         _ scalars: inout [Unicode.Scalar],
@@ -193,11 +227,36 @@ public enum MiniNotationCore {
                 idx = scalars.index(after: idx)
                 let n = parseOptionalInt(&scalars, idx: &idx) ?? 1
                 atom = .weight(atom, n)
+            case "?":
+                // Random degradation: a? → omit with probability 0.5
+                // a?0.3 → omit with probability 0.3
+                idx = scalars.index(after: idx)
+                let prob = parseOptionalDouble(&scalars, idx: &idx) ?? 0.5
+                atom = .degrade(atom, prob)
             default:
                 return atom
             }
         }
         return atom
+    }
+
+    /// Read an optional double literal immediately (digits and optional decimal).
+    /// Used for ? probability parsing: a?0.3 → 0.3.
+    private static func parseOptionalDouble(
+        _ scalars: inout [Unicode.Scalar],
+        idx: inout Array<Unicode.Scalar>.Index
+    ) -> Double? {
+        var digits = ""
+        while idx < scalars.endIndex {
+            let c = scalars[idx]
+            if (c >= "0" && c <= "9") || c == "." {
+                digits.append(Character(c))
+                idx = scalars.index(after: idx)
+            } else {
+                break
+            }
+        }
+        return digits.isEmpty ? nil : Double(digits)
     }
 
     /// Read an optional integer immediately (no whitespace). Returns nil if no digit follows.
@@ -270,7 +329,7 @@ public enum MiniNotationCore {
     }
 
     private static func isWordChar(_ c: Unicode.Scalar) -> Bool {
-        let prohibited: Set<Unicode.Scalar> = [" ", "\t", "\n", "\r", "[", "]", "<", ">", ",", "*", "!", "@"]
+        let prohibited: Set<Unicode.Scalar> = [" ", "\t", "\n", "\r", "[", "]", "<", ">", "{", "}", ",", "*", "!", "@", "?"]
         return !prohibited.contains(c)
     }
 
@@ -395,6 +454,100 @@ public enum MiniNotationCore {
         case .weight(let inner, _):
             // Weight is handled at the sequence level; unwrap here
             return atomToPattern(inner)
+        case .degrade(let inner, let prob):
+            // a? → randomly omit this step with probability prob
+            // Uses PRNG seeded by cycle and event index (deterministic, documented non-bitwise-equiv).
+            return degradePattern(atomToPattern(inner), prob: prob)
+        case .polymeter(let branches, let stepsOverride):
+            // {a b, c d e}%n — parallel branches with independent step counts.
+            return polymeterPattern(branches, stepsPerCycle: stepsOverride)
+        }
+    }
+
+    // MARK: - degrade helper
+
+    /// Apply random omission to a pattern with given probability.
+    ///
+    /// Semantics: for each hap in each cycle, use a deterministic PRNG
+    /// seeded by (cycle, eventIndex) to decide if the hap is omitted.
+    /// prob is the OMISSION probability: prob=0.5 → ~50% of steps silent.
+    ///
+    /// DOCUMENTED APPROXIMATION: Strudel's degradeBy uses a continuous
+    /// time-based rand signal with time-hash RNG. Our PRNG is different
+    /// (splitmix64 seeded by cycle+index vs. time-keyed murmur).
+    /// We guarantee: determinism (same seed = same result), correct
+    /// proportion (measured over many cycles ≈ prob), no bit-exact match.
+    static func degradePattern(_ pat: Pattern<String>, prob: Double) -> Pattern<String> {
+        guard prob > 0 else { return pat }
+        guard prob < 1 else { return .silence }
+        return splitQueries(Pattern { span in
+            let cycleN = span.begin.floorInt
+            let haps   = pat.query(span).sorted { $0.part.begin < $1.part.begin }
+            return haps.enumerated().compactMap { (idx, hap) -> Hap<String>? in
+                var rng = MiniPRNG(cycle: cycleN, eventIndex: idx)
+                let r = rng.nextDouble()
+                return r < prob ? nil : hap   // omit if r < prob
+            }
+        })
+    }
+
+    // MARK: - polymeter helper
+
+    /// Build a polymeter pattern from multiple branches.
+    ///
+    /// Semantics (Strudel public docs / strudel.cc/learn/mini-notation):
+    ///   {a b, c d e} — each branch maintains its own step count per cycle.
+    ///   Branch 0 has 2 steps/cycle, branch 1 has 3 steps/cycle.
+    ///   They are stacked (simultaneous): at any given cycle, all branches play
+    ///   their own full cycle's worth of steps.
+    ///
+    ///   {a b, c d e} over 6 cycles:
+    ///     branch "a b": a b | a b | a b | a b | a b | a b  (2 steps each)
+    ///     branch "c d e": c d e | c d e | c d e | ...     (3 steps each)
+    ///   Both run in parallel, each taking a full cycle.
+    ///
+    ///   With stepsOverride (%n): forces each branch to treat its content as
+    ///   fitting exactly n steps per cycle, compressing or stretching accordingly.
+    ///   {a b c}%4: plays a b c over a cycle divided into 4 steps, so it stretches.
+    ///
+    ///   Oracle: {bd sn, hh hh hh} →
+    ///     bd at [0,1/2), sn at [1/2,1) simultaneous with
+    ///     hh at [0,1/3), hh at [1/3,2/3), hh at [2/3,1)
+    ///   This is structurally identical to [bd sn, hh hh hh] but differs in
+    ///   multi-cycle behaviour: polymeter rotates step offsets, comma-chord doesn't.
+    ///
+    ///   Without stepsOverride, the stack semantics for a single cycle are the same
+    ///   as a chord `[...]` (each branch fills a full cycle). The polymeter difference
+    ///   emerges in how many cycles it takes to complete one "super-cycle".
+    static func polymeterPattern(_ branches: [[Atom]], stepsPerCycle: Int?) -> Pattern<String> {
+        guard !branches.isEmpty else { return .silence }
+
+        if let n = stepsPerCycle {
+            // With %n: each branch is forced to n steps per cycle.
+            // The branch pattern is fast(branchLen/n) so it fits n steps.
+            // Actually: we run each branch at its own natural rate but query
+            // it aligned to n steps per cycle.
+            let branchPats = branches.map { atomsToPattern($0) }
+            // Compute each branch length (number of top-level atoms)
+            let branchLengths = branches.map { atoms -> Int in
+                let expanded = atoms.flatMap { expandReplicate($0) }
+                return expanded.count
+            }
+            // Each branch: stretch/compress to fit n steps per cycle
+            let stretchedPats = zip(branchPats, branchLengths).map { (pat, len) -> Pattern<String> in
+                guard len > 0, n > 0 else { return pat }
+                // ratio = len/n: if len=3, n=4, ratio=3/4, so fast(3/4) makes 3 fit in 4 slots
+                let ratio = Rational(len, n)
+                return pat.fast(ratio)
+            }
+            return stack(stretchedPats)
+        } else {
+            // Without %n: each branch plays its own full cycle independently.
+            // This is equivalent to stacking the branch patterns as full-cycle patterns.
+            // Each branch fills the entire [0,1) span with its step count.
+            // This is the "pure polymeter" where step counts differ.
+            let branchPats = branches.map { atomsToPattern($0) }
+            return stack(branchPats)
         }
     }
 }

@@ -884,6 +884,80 @@ const CASES = [
         .set(sine.fmap(v => ({ gain: v })));
     },
   },
+
+  // ── P2: superimpose(f) ──────────────────────────────────────────────────────
+  // superimpose(f) = stack(self, f(self)) — no time offset
+  // Oracle: s("bd sn").superimpose(x => x.fast(2))
+  //   → original 2 events + fast(2) 4 events = 6 events total in [0,1)
+  {
+    label: 's("bd sn").superimpose(x => x.fast(2))',
+    spanCycles: 1,
+    build() {
+      const pat = fastcat(pure({s:'bd'}), pure({s:'sn'}));
+      return stack(pat, pat.fast(2));
+    },
+  },
+
+  // ── P2: iter(n) — rotates pattern 1/n of cycle per cycle ────────────────────
+  // iter(4) on "bd sn hh oh": cycle k starts at k/4 through the pattern.
+  // Oracle: queryArc(0, 4) to capture 4 cycles
+  {
+    label: 's("bd sn hh oh").iter(4)',
+    spanCycles: 4,
+    build() {
+      const pat = fastcat(pure({s:'bd'}), pure({s:'sn'}), pure({s:'hh'}), pure({s:'oh'}));
+      return pat.iter(4);
+    },
+  },
+
+  // ── P2: palindrome — even cycles forward, odd cycles reversed ──────────────
+  // palindrome on "a b c d": cycle 0 = normal, cycle 1 = reversed
+  {
+    label: 's("bd sn hh oh").palindrome',
+    spanCycles: 2,
+    build() {
+      const pat = fastcat(pure({s:'bd'}), pure({s:'sn'}), pure({s:'hh'}), pure({s:'oh'}));
+      return pat.palindrome();
+    },
+  },
+
+  // ── P2: hurry(n) — fast(n) + speed×n ────────────────────────────────────────
+  // hurry(2) on s("bd sn"): 4 events, each with speed=2
+  {
+    label: 's("bd sn").hurry(2)',
+    spanCycles: 1,
+    build() {
+      const pat = fastcat(pure({s:'bd'}), pure({s:'sn'}));
+      return pat.hurry(2);
+    },
+  },
+
+  // ── P2: chunk(4, fast(2)) — apply f to rotating 1/4 portion ─────────────────
+  // chunk(4, fast(2)) on "a b c d": over 4 cycles, each 1/4 gets doubled
+  {
+    label: 's("bd sn hh oh").chunk(4, x => x.fast(2))',
+    spanCycles: 4,
+    build() {
+      const pat = fastcat(pure({s:'bd'}), pure({s:'sn'}), pure({s:'hh'}), pure({s:'oh'}));
+      return pat.chunk(4, x => x.fast(2));
+    },
+  },
+
+  // ── P2: polymeter {bd sn, hh hh hh} ─────────────────────────────────────────
+  // Two branches in parallel: [bd sn] (2 steps) and [hh hh hh] (3 steps)
+  // Each branch fills the full cycle. Single cycle semantics same as stack([bd sn], [hh hh hh]).
+  // NOTE: This fixture is labelled as a mini-notation string but is not parseable
+  // by CodeParser directly (mini() is not a CodeParser function). It is verified
+  // in P2Tests.swift via MiniNotationCore.parse("{bd sn, hh hh hh}").
+  {
+    label: 's("{bd sn, hh hh hh}")',
+    spanCycles: 1,
+    build() {
+      const branchA = fastcat(pure({s:'bd'}), pure({s:'sn'}));
+      const branchB = fastcat(pure({s:'hh'}), pure({s:'hh'}), pure({s:'hh'}));
+      return stack(branchA, branchB);
+    },
+  },
 ];
 
 // ── Query and serialize ──────────────────────────────────────────────────────

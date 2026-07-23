@@ -1,18 +1,18 @@
 # Tareas — Mini Engine grado producción
 
-## Funcionalidad v1.1 (functionalityv1.1.md) — EN CURSO
-- [x] P0-1 Acordes con coma (ya hecho en ronda anterior; verificar n("[0,2,4]"))
-- [ ] P0-2 Señales continuas: signal(), sine/saw/tri/square/rand/perlin + .range/.slow + segment
-- [ ] P0-3 Efectos por evento (eliminar per-chain compromise; filtros por voz)
-- [ ] P0-4 orbit(n) — buses de efectos
-- [ ] P1-5 duck/duckattack/duckdepth (sidechain)
-- [ ] P1-6 lpenv/hpenv (envolvente de filtro, sonido acid)
-- [ ] P1-7 add() aritmética de patrones
-- [ ] P1-8 postgain, size, lpq (+verificar vs resonance)
-- [x] P1-9 alias dec/att/sus/rel (hechos); [ ] fb→delayfeedback, dt→delaytime
-- [x] P1-10 $: (hecho)
-- [ ] P2: arp, superimpose, stut, echo, iter, chunk, palindrome, range, hurry, swingBy, mini ?, polimetro {}, slice/loopAt
-- [ ] COMPATIBILITY.md al día por fase
+## Funcionalidad v1.1 (functionalityv1.1.md) — ✅ COMPLETA
+- [x] P0-1 Acordes con coma
+- [x] P0-2 Señales continuas: signal(), sine/saw/isaw/tri/square/cosine/rand/perlin + range/rangex/segment
+- [x] P0-3 Efectos por evento (biquads Audio EQ Cookbook por voz; buffer por evento en samples)
+- [x] P0-4 orbit(n) — buses reverb+delay por orbit
+- [x] P1-5 duck/duckattack/duckdepth (sidechain sobre OrbitBus)
+- [x] P1-6 lpenv/hpenv + lpq/hpq (alias de resonance verificado)
+- [x] P1-7 add() (transposición, detune con acorde)
+- [x] P1-8 postgain, size/roomsize (presets discretos), fb/dt
+- [x] P1-9/10 alias y $: (rondas anteriores)
+- [x] P2 completo: arp, superimpose, stut, echo, iter, chunk, palindrome, hurry, swingBy/swing, mini ?, polimetro {}%n, slice/loopAt
+- [x] COMPATIBILITY.md tabla final v1.1
+- [x] 476 tests en verde, oracle 71 fixtures / 510 haps, AudioValidate 24/24
 
 # (histórico) Tareas — newchanges.md
 

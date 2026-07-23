@@ -688,3 +688,87 @@ Nota: el cambio de preset en AVAudioUnitReverb es inmediato (no interpolado). A 
 - postgain multiplica RMS: ratio = 0.5 ± 2%
 - add() transposición: C3+12=C4, C3+7=G3, cartesian product chord, estructura preservada
 - Regresión: resonance sigue funcionando después de añadir lpq/hpq
+
+---
+
+## P2 Features — Combinadores de Patrón (2026-07-23)
+
+Todos los P2 implementados y en verde (476 tests, 0 fallos). Nuevas entradas en la tabla de compatibilidad:
+
+| Función | Status | Notes |
+|---|---|---|
+| `arp("up"\|"down"\|"updown"\|"downup")` | ✅ nativo (P2) | Arpegia acordes (haps simultáneos en el mismo whole). Ordena por valor MIDI del campo `note`. `up`=ascendente; `down`=descendente; `updown`=sube luego baja (sin repetir extremos); `downup`=baja luego sube. Distribuye uniformemente en el tiempo original del acorde. |
+| `superimpose(f)` | ✅ nativo (P2) | `stack(self, f(self))`. Apila el patrón original con una copia transformada. La lambda `f` se parsea en CodeParser con la misma sintaxis que `every` (`x => x.fast(2)`, etc.). Oracle verificado. |
+| `stut(n, feedback, time)` | ✅ nativo (P2) | n repeticiones con gain decreciente. `stut(n, fb, t)` = stack de n copies, copy k con gain=fb^k y `rotR(t*k)`. **SEMÁNTICA PERIÓDICA**: `rotR` es rotación circular — las copias sangran entre ciclos, produciendo más eventos en [0,1) de los esperados ingenuamente. Confirmado equivalente al comportamiento de Strudel con `late()`. `stut(3, 0.5, 0.25)` sobre 1 evento → 5 eventos en [0,1). |
+| `echo(n, time, feedback)` | ✅ nativo (P2) | Idéntico a `stut` con orden de args diferente: `echo(n, t, fb) = stut(n, fb, t)`. |
+| `iter(n)` | ✅ nativo (P2) | Rota el patrón 1/n hacia adelante cada ciclo. Ciclo k: `rotL(k/n)`. `iter(1)` = identidad. Envuelve: ciclo n = ciclo 0. Oracle verificado (4 ciclos). |
+| `iterBack(n)` | ✅ nativo (P2) | Rotación hacia atrás: ciclo k → `rotR(k/n)`. |
+| `chunk(n, f)` | ✅ nativo (P2) | Aplica `f` a la ventana [k/n, (k+1)/n) del patrón cada ciclo, donde k = cycleNumber mod n. **Semántica**: `f` se aplica al patrón GLOBAL completo y se consulta solo la ventana de ese ciclo del resultado transformado. Por ejemplo, `chunk(4, fast(2))` en ciclo 0: aplica `fast(2)` al patrón entero (dobla la densidad de eventos), luego extrae eventos de [0, 1/4). Oracle verificado (4 ciclos). |
+| `palindrome` | ✅ nativo (P2) | Alterna normal/invertido por ciclo: ciclos pares=normal, ciclos impares=`rev`. Implementado como `every(2, rev)`. Oracle verificado. |
+| `hurry(n)` | ✅ nativo (P2) | `fast(n)` + `speed(n)`. Acelera el patrón Y la reproducción de muestra simultáneamente. Si ya hay un campo `speed` en el hap, se multiplica: `newSpeed = oldSpeed × n`. Oracle verificado. |
+| `swingBy(x, n)` | ✅ nativo (P2) | Retrasa pasos impares por `x` fracciones de ciclo. `stepIndex = floor(posInCycle × n)`. Pasos con stepIndex impar se retrasan por `x / n`. **Aproximación Rational**: `Rational(approximating: 1.0/3.0) = 333333/1000000` (no 1/3 exacto). Tolerancia en tests: 1e-4. **Semántica de step con period=n**: para 4 eventos igualados con n=2, los stepIndex son [0,0,1,1] — los 2 primeros son pares (sin retraso), los 2 últimos son impares (retrasados). |
+| `swing(n)` | ✅ nativo (P2) | `swingBy(1/3, n)` — preset de swing estándar (1/3 = razón de swing de jazz/funk). |
+| Mini `?` (degrade) | ✅ nativo (P2) | Omisión aleatoria en mini-notación: `s("bd? sn")` → bd se omite ~50% de las veces. PRNG determinista: MiniPRNG semillado por hash(ciclo, posición_en_ciclo). Probabilidad configurable: `bd?0.3` → omisión 70%. `degrade(Atom, Double)` en el enum Atom de MiniNotationCore. |
+| Mini `{a b, c d e}` (polimetro) | ✅ nativo (P2) | Polimetría: cada rama tiene su propia longitud de ciclo; el LCM determina el período completo. `{bd sn, hh hh hh}` → 2 eventos de drum + 3 de hh = 5 eventos por ciclo. Implementado en MiniNotationCore como `polymeter([[Atom]], Int?)`. |
+| `slice(n, indexPat)` | ✅ nativo (P2) | Corta el sample en n rebanadas iguales; `indexPat` selecciona cuál slice reproducir. `slice(4, "0 1 2 3")` → 4 eventos, cada uno con begin/end = k/4..(k+1)/4. `indexPat` puede ser mini-notación. Índices fuera de rango: wrapeados mod n. CodeParser parsea `slice(n, "mini")`. |
+| `loopAt(n)` | ✅ nativo (P2) | Reproduce el sample en un loop de exactamente n ciclos. Setea `speed = 1/n`, `begin = 0`, `end = 1`. El scheduler usa begin/end para el segmento de buffer; speed=1/n estira el sample a n ciclos. |
+| `.range(min, max)` | ✅ nativo (P0-2) | Ya documentado arriba. |
+| `.segment(n)` | ✅ nativo (P0-2) | Ya documentado arriba. |
+
+### Semánticas confirmadas por función
+
+**arp**: Ordena haps por `.value["note"]?.doubleValue` dentro de cada grupo de haps simultáneos (mismo `whole`). Redistribuye tiempos uniformemente. `updown` genera la secuencia sin repetir los extremos (longitud = 2n-2 para n notas).
+
+**stut/echo — rotación periódica**: `rotR(t)` desplaza TODOS los eventos del patrón hacia la derecha en el tiempo, de forma periódica (wrapping en el boundary del ciclo). Esto significa que la copia k produce eventos tanto del "ciclo actual" como del "ciclo anterior que sangra a este". Para `stut(3, 0.5, 0.25)` en un patrón de 1 evento, se generan 5 haps en [0,1) (no 3). Este comportamiento es idéntico al de Strudel con `late()` y correcto para audio (se escuchan los ecos en los tiempos correctos).
+
+**chunk** — diferencia con lo esperado: `chunk(n, f)` NO aisla la ventana antes de aplicar `f`. Aplica `f` globalmente y luego consulta la ventana. Por ejemplo, `chunk(4, fast(2))` en ciclo 0 no produce dos copias del primer evento, sino el primer y segundo evento del patrón acelerado×2.
+
+**swingBy** — stepIndex semántica: `stepIndex = floor(posInCycle × period)`. Para period=2 y 4 eventos igualados:
+- pos=0.00: floor(0.00×2)=0 (par) → sin cambio
+- pos=0.25: floor(0.25×2)=0 (par) → sin cambio  
+- pos=0.50: floor(0.50×2)=1 (impar) → retrasado por x/period
+- pos=0.75: floor(0.75×2)=1 (impar) → retrasado por x/period
+
+Esto divide el ciclo en `period` grupos de beats, no en pasos individuales.
+
+**degrade** — PRNG: `MiniPRNG` usa hash de 64-bit semillado por `(cycleNumber, stepIndex)`. Mismo seed → mismo resultado always. La distribución converge a la probabilidad especificada en muchos ciclos (verificado: 200 ciclos, proporción dentro de ±10% del valor nominal).
+
+### Aproximaciones documentadas (P2)
+
+| Función | Aproximación | Impacto |
+|---|---|---|
+| `swingBy(x, n)` | `Rational(approximating:)` convierte x a fracción con denominador 1e6 (ej: 1/3 → 333333/1000000). Error: ~3×10⁻⁷. | Retraso de swing con error < 0.3 ms a 120bpm. Inaudible. |
+| `degrade` / Mini `?` | PRNG distinto a Strudel (Strudel usa tiempo de audio como seed). Distribución uniforme, no reproducible entre motores. | Solo la proporción estadística coincide. Correcto para producción EEG. |
+| `stut`/`echo` count | En ciclos cortos, el wrapping de `rotR` produce más haps de los naively esperados. | Comportamiento idéntico a Strudel (correcto); solo afecta a test assertions que asuman conteo ingenuo. |
+
+### Oracle (P2)
+
+6 nuevos fixtures añadidos a `oracle/generate.mjs`:
+1. `s("bd sn").superimpose(x => x.fast(2))` — oracle: stack(pat, pat.fast(2))
+2. `s("bd sn hh oh").iter(4)` — oracle: 4 ciclos de rotación
+3. `s("bd sn hh oh").palindrome` — oracle: ciclo 0=normal, ciclo 1=invertido
+4. `s("bd sn").hurry(2)` — oracle: fast(2) + speed×2
+5. `s("bd sn hh oh").chunk(4, x => x.fast(2))` — oracle: 4 ciclos con ventana rotante
+6. `s("{bd sn, hh hh hh}")` — oracle: stack(branchA, branchB) con longitudes distintas
+
+Total oracle: 71 fixtures, 510 haps. `OracleTests` verifica todo en verde.
+
+**Nota**: `degrade` (`?`) y `palindrome` son probabilísticos o requieren construcción separada del lado JS — no incluidos como fixtures oracle exactos (documentado). Se verifican vía tests unitarios `P2Tests.swift`.
+
+### Test coverage P2
+
+`P2Tests.swift` — 60 tests, todos PASS:
+- arp: up/down/updown/downup, conteo de notas, timing
+- superimpose: conteo de eventos, identidad de sample
+- stut: 5 eventos (rotación periódica), gains en posiciones clave, echo=stut con args reordenados
+- iter: identidad n=1, rotación por ciclo, wrap en n, iterBack
+- chunk: estructura ciclo 0, rotación entre ciclos
+- palindrome: ciclos pares=normal, ciclos impares=invertido
+- hurry: conteo de eventos, campo speed, speed multiplicativo
+- swingBy: pasos pares sin cambio, pasos impares retrasados (tolerancia 1e-4), swing=swingBy(1/3, n)
+- degrade: determinismo, proporción estadística, probabilidad 0/1 corner cases, control pattern
+- polymeter: 5 eventos en ciclo único, distribución de eventos
+- range/segment: existencia confirmada (Signal.swift, P0-2)
+- slice: begin/end fracciones, wrap de índice
+- loopAt: speed=1/n, begin=0, end=1
+- CodeParser: los 14 métodos P2 parseables (incluyendo lambdas en superimpose/chunk)

@@ -391,7 +391,17 @@ public struct CodeParser {
         // P1-7: add()
         "add",
         // P1-8: postgain, size, roomsize, fb, dt
-        "postgain", "size", "roomsize", "fb", "dt"
+        "postgain", "size", "roomsize", "fb", "dt",
+        // P2: pattern functions
+        "arp",
+        "superimpose",
+        "stut", "echo",
+        "iter", "iterBack",
+        "chunk",
+        "palindrome",
+        "hurry",
+        "swingBy", "swing",
+        "slice", "loopAt"
     ]
 
     private let friendlyUnknown: Set<String> = [
@@ -859,6 +869,130 @@ public struct CodeParser {
                     else                      { pattern = pattern.dt(unquote(t)) }
                 }
 
+            // ── P2: arp ────────────────────────────────────────────────────
+            // arp("up"|"down"|"updown"|"downup") — arpeggiate chord events.
+            case "arp":
+                if let arg = token.arg {
+                    let mode = unquote(arg.trimmingCharacters(in: .whitespaces))
+                    pattern = pattern.arp(mode)
+                }
+
+            // ── P2: superimpose(f) ─────────────────────────────────────────
+            // superimpose(x => x.method(args)) = stack(self, f(self))
+            case "superimpose":
+                if let arg = token.arg,
+                   let f = parseLambda(arg.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    pattern = pattern.superimpose(f)
+                } else {
+                    print("[CodeParser] 'superimpose' could not parse lambda: \(token.arg ?? "nil")")
+                }
+
+            // ── P2: stut(n, feedback, time) ────────────────────────────────
+            case "stut":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    if parts.count == 3,
+                       let n  = Int(parts[0].trimmingCharacters(in: .whitespaces)),
+                       let fb = parseDouble(parts[1].trimmingCharacters(in: .whitespaces)),
+                       let t  = parseDouble(parts[2].trimmingCharacters(in: .whitespaces)) {
+                        pattern = pattern.stut(n, fb, t)
+                    } else {
+                        print("[CodeParser] 'stut' requires 3 args (n, feedback, time): \(arg)")
+                    }
+                }
+
+            // ── P2: echo(n, time, feedback) ────────────────────────────────
+            case "echo":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    if parts.count == 3,
+                       let n  = Int(parts[0].trimmingCharacters(in: .whitespaces)),
+                       let t  = parseDouble(parts[1].trimmingCharacters(in: .whitespaces)),
+                       let fb = parseDouble(parts[2].trimmingCharacters(in: .whitespaces)) {
+                        pattern = pattern.echo(n, t, fb)
+                    } else {
+                        print("[CodeParser] 'echo' requires 3 args (n, time, feedback): \(arg)")
+                    }
+                }
+
+            // ── P2: iter(n) / iterBack(n) ──────────────────────────────────
+            case "iter":
+                if let arg = token.arg,
+                   let n = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.iter(n)
+                }
+
+            case "iterBack":
+                if let arg = token.arg,
+                   let n = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.iterBack(n)
+                }
+
+            // ── P2: chunk(n, f) ────────────────────────────────────────────
+            case "chunk":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    if parts.count == 2,
+                       let n = Int(parts[0].trimmingCharacters(in: .whitespaces)),
+                       let f = parseLambda(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) {
+                        pattern = pattern.chunk(n, f)
+                    } else {
+                        print("[CodeParser] 'chunk' could not parse args: \(arg)")
+                    }
+                }
+
+            // ── P2: palindrome ─────────────────────────────────────────────
+            // palindrome has no arguments (used as .palindrome or .palindrome())
+            case "palindrome":
+                pattern = pattern.palindrome
+
+            // ── P2: hurry(n) ───────────────────────────────────────────────
+            case "hurry":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.hurry(v) }
+                }
+
+            // ── P2: swingBy(amount, period) / swing(period) ───────────────
+            case "swingBy":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    if parts.count == 2,
+                       let amount = parseDouble(parts[0].trimmingCharacters(in: .whitespaces)),
+                       let period = Int(parts[1].trimmingCharacters(in: .whitespaces)) {
+                        pattern = pattern.swingBy(amount, period)
+                    } else {
+                        print("[CodeParser] 'swingBy' requires 2 args (amount, period): \(arg)")
+                    }
+                }
+
+            case "swing":
+                if let arg = token.arg,
+                   let period = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.swing(period)
+                }
+
+            // ── P2: slice(n, indexPattern) ─────────────────────────────────
+            case "slice":
+                if let arg = token.arg {
+                    let parts = splitTopLevelCommas(arg)
+                    if parts.count == 2,
+                       let n = Int(parts[0].trimmingCharacters(in: .whitespaces)) {
+                        let idx = unquote(parts[1].trimmingCharacters(in: .whitespaces))
+                        pattern = pattern.slice(n, idx)
+                    } else {
+                        print("[CodeParser] 'slice' requires 2 args (n, indexPattern): \(arg)")
+                    }
+                }
+
+            // ── P2: loopAt(n) ──────────────────────────────────────────────
+            case "loopAt":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.loopAt(v) }
+                    else if let n = Int(t)    { pattern = pattern.loopAt(n) }
+                }
+
             default:
                 break
             }
@@ -954,6 +1088,26 @@ public struct CodeParser {
                 case "ply":
                     if let arg = token.arg, let v = Int(arg.trimmingCharacters(in: .whitespaces)) {
                         result = result.ply(v)
+                    }
+                case "hurry":
+                    if let arg = token.arg, let v = self.parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
+                        result = result.hurry(v)
+                    }
+                case "iter":
+                    if let arg = token.arg, let v = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                        result = result.iter(v)
+                    }
+                case "palindrome":
+                    result = result.palindrome
+                case "lpf":
+                    if let arg = token.arg {
+                        let t = arg.trimmingCharacters(in: .whitespaces)
+                        if let v = self.parseDouble(t) { result = result.lpf(v) }
+                    }
+                case "hpf":
+                    if let arg = token.arg {
+                        let t = arg.trimmingCharacters(in: .whitespaces)
+                        if let v = self.parseDouble(t) { result = result.hpf(v) }
                     }
                 default:
                     print("[CodeParser] Lambda: unknown method '\(token.name)' — skipping")
