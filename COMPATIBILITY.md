@@ -57,6 +57,20 @@ Living document: function → status → equivalence notes.
 | `phaser` | ❌ no (Fase 4) | Not implemented. See note below |
 | `bank("name")` | ✅ nativo (Fase 5) | Sample bank selection. `s("bd").bank("tr909")` → looks up key "tr909_bd". Patroneable. Scheduler: if bank field present, effective lookup key = `"\(bank)_\(s)"`. Unknown bank → friendly log warning, no crash. Both engines use the same key convention. |
 | `dec(x)` | ✅ nativo (Fase 5) | Alias for `decay(x)`. Strudel short form. Supports leading-dot literals: `.dec(.4)` = `.dec(0.4)`. |
+| `signal { t in ... }` | ✅ nativo (P0-2) | Swift-only EEG hook. Creates a continuous Pattern<Double> sampled at span.begin. whole=nil (no discrete structure). Not available in the code editor. |
+| `sine` | ✅ nativo (P0-2) | Sine signal 0..1. sine(t) = (sin(2πt)+1)/2. Phase: t=0→0.5, t=0.25→1.0 (peak), t=0.5→0.5, t=0.75→0.0 (trough). Exact match with oracle. |
+| `saw` | ✅ nativo (P0-2) | Sawtooth 0..1. saw(t) = t mod 1. Rises from 0, wraps at cycle. Exact match with oracle. |
+| `isaw` | ✅ nativo (P0-2) | Inverse sawtooth 1..0. isaw(t) = 1 − (t mod 1). Exact match with oracle. |
+| `tri` | ✅ nativo (P0-2) | Triangle 0..1. Implemented as fastcat(saw, isaw): rises 0→1 in first half, falls 1→0 in second. Exact match with oracle. |
+| `square` | ✅ nativo (P0-2) | Square 0..1. square(t) = floor((t×2) mod 2). Low first half, high second half. Exact match with oracle. |
+| `cosine` | ✅ nativo (P0-2) | Cosine 0..1. cosine(t) = (cos(2πt)+1)/2. Phase: t=0→1.0, t=0.25→0.5, t=0.5→0.0. Exact match with oracle. |
+| `rand` | ✅ nativo (P0-2) | Pseudo-random signal [0,1). Deterministic: same t → same value. **APPROXIMATION**: sequence differs from Strudel (different hash — see rand note below). Distribution is uniform [0,1). |
+| `perlin` | ✅ nativo (P0-2) | Smooth noise [0,1). Cubic Hermite interpolation between rand values at integer boundaries. **APPROXIMATION**: different hash than Strudel. Shape is smooth and bounded; exact values differ. |
+| `.range(min, max)` | ✅ nativo (P0-2) | Scale 0..1 signal to [min, max]. Confirmed: saw.range(2,4).segment(4) → [2, 2.5, 3, 3.5]. |
+| `.rangex(min, max)` | ✅ nativo (P0-2) | Exponential scale 0..1 → [min, max]. Useful for frequency parameters. min/max must be > 0. |
+| `.segment(n)` | ✅ nativo (P0-2) | Discretize a signal into n haps/cycle. Each hap k: part=whole=[k/n,(k+1)/n), value=signal at t=k/n. Oracle confirmed: sine.segment(8)[0]=0.5, sine.segment(8)[2]=1.0. |
+| Signal in control methods | ✅ nativo (P0-2) | `.gain(Pattern<Double>)`, `.lpf(Pattern<Double>)`, `.hpf(Pattern<Double>)`, `.pan(Pattern<Double>)`, `.room(Pattern<Double>)`, `.cutoff(Pattern<Double>)`, `.resonance(Pattern<Double>)`, `.speed(Pattern<Double>)` all accept a signal. Value evaluated at event whole.begin (appLeft semantics). |
+| Signal in CodeParser | ✅ nativo (P0-2) | Expressions: `sine`, `saw`, `isaw`, `tri`, `square`, `cosine`, `rand`, `perlin` + chain `.range(a,b)`, `.rangex(a,b)`, `.slow(n)`, `.fast(n)`, `.segment(n)` parsed as argument to control methods. Examples: `.lpf(sine.range(200, 2000))`, `.gain(saw.slow(4))`, `.gain(rand.range(0,1))`. |
 | `att(x)` | ✅ nativo (Fase 5) | Alias for `attack(x)`. |
 | `sus(x)` | ✅ nativo (Fase 5) | Alias for `sustain(x)`. |
 | `rel(x)` | ✅ nativo (Fase 5) | Alias for `release(x)`. |
@@ -368,3 +382,67 @@ live engine and asserts it falls in [0.1719, 0.3193] (Strudel reference 0.2457 �
 The triangle amplitude fix (triDrive formula) brought triangle into range without changing the
 global headroom factor. A single global headroom is sufficient (spread across waveforms is ≤1.5×
 after the fix: saw 1.17, sine 1.05, square 1.17, triangle 0.99).
+
+---
+
+## P0-2: Señales continuas (2026-07-23)
+
+### Semántica confirmada contra oracle
+
+| Propiedad | Valor confirmado |
+|---|---|
+| Punto de muestreo | `span.begin` (NO el punto medio). Oracle: sine.queryArc(0, 1/8) → value=0.5 = sine(0) |
+| whole de un hap de señal | `nil` — sin estructura discreta |
+| Fase de sine | t=0→0.5, t=0.25→1.0 (pico), t=0.5→0.5, t=0.75→0.0 (valle) |
+| segment(n) — whole | `whole = part = [k/n, (k+1)/n)` (estructura discreta; no nil) |
+| gain(signal) en eventos | Señal evaluada en `whole.begin` del evento (appLeft semántica) |
+| Coincidencia oracle saw.range(2,4).segment(4) | [2.0, 2.5, 3.0, 3.5] — exacto |
+
+### signal() con callback externo (EEG hook)
+
+```swift
+// Swift-only API — para EEG real:
+let eegSignal = signal { t in brainFeature.currentValue }
+let pattern = s("sawtooth").lpf(eegSignal.range(200, 2000))
+```
+
+No hay sintaxis en el editor de código para `signal()` con callback externo.
+En el editor se usan los osciladores nombrados (`sine`, `saw`, etc.).
+
+### Osciladores implementados
+
+| Oscilador | Fórmula | Exactitud |
+|---|---|---|
+| `sine` | (sin(2πt)+1)/2 | Exacta (oracle match bit-a-bit en doubles) |
+| `saw` | t mod 1 | Exacta |
+| `isaw` | 1 − (t mod 1) | Exacta |
+| `square` | floor((t×2) mod 2) | Exacta |
+| `cosine` | (cos(2πt)+1)/2 | Exacta |
+| `tri` | fastcat(saw, isaw) | Exacta |
+| `rand` | hash(t) / 2^64 | **APROXIMACIÓN** — secuencia distinta a Strudel (ver nota) |
+| `perlin` | Hermite(rand(floor(t)), rand(floor(t)+1)) | **APROXIMACIÓN** — forma suave, valores distintos |
+
+### Nota sobre rand y perlin
+
+**rand**: Strudel usa un algoritmo xorshift legacy (`__timeToIntSeed` + `__xorwise`) con granularidad 1/536870912. El MiniEngine usa un hash splitmix64 de 64-bit sobre la misma granularidad. La distribución es uniforme [0,1) y el determinismo está garantizado (mismo t → mismo valor), pero la secuencia exacta difiere. Para el EEG esto es correcto: importa la distribución, no los valores exactos.
+
+**perlin**: Strudel implementa perlin con un hash diferente (murmur-based). El MiniEngine usa interpolación cúbica de Hermite (smoothstep 3f²−2f³) entre valores `rand` en boundaries de ciclo entero. La forma es suave y acotada [0,1). Los valores exactos difieren de Strudel.
+
+### Suavidad intra-evento
+
+El valor de un control modulated por señal (e.g. `.lpf(sine.range(200,2000))`) se evalúa UNA VEZ por evento, en `whole.begin`. Dentro del evento, el valor es constante (no hay interpolación per-sample).
+
+La interpolación continua por-sample (suavidad real entre eventos) llega con P0-3 (efectos por evento). Hasta entonces: control por evento, sin audible zipper noise a tempo musical razonable.
+
+### Estado EEG hook
+
+`signal { t in ... }` está disponible como API pública Swift. Para usar en el EEG:
+
+```swift
+// En la app, cuando se recibe una nueva feature EEG:
+let alphaSignal = signal { t in eegEngine.alphaValue }
+let codePattern = try CodeParser().parse("s(\"sawtooth\").note(\"c3\")")
+let modulatedPattern = codePattern.lpf(alphaSignal.range(200, 2000))
+```
+
+La integración completa del ciclo EEG→audio (scheduling continuo de señal) requiere que el scheduler consulte la señal en cada buffer de audio (P0-3+). La infraestructura de patrones está lista.

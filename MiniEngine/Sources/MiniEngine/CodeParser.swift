@@ -192,6 +192,140 @@ public struct CodeParser {
         return pat.map { var v = $0; v["_layer"] = .double(0.0); return v }
     }
 
+    // MARK: - Signal expression parser
+    //
+    // Parses a signal expression used as argument to control methods:
+    //   "sine"                     → sine
+    //   "sine.range(200, 2000)"    → sine.range(200, 2000)
+    //   "saw.slow(4)"              → saw.slow(4)
+    //   "saw.slow(4).range(0.2, 0.8)"
+    //   "rand.range(0, 1)"
+    //   "perlin.range(0.2, 0.8)"
+    //   "sine.slow(2).segment(8)"
+    //
+    // Supported signal names: sine, saw, isaw, tri, square, cosine, rand, perlin
+    // Supported chain methods: .range(min, max), .rangex(min, max), .slow(n), .fast(n),
+    //                          .segment(n), .seg(n)
+    //
+    // Note: signal() with an external Swift callback has no editor syntax.
+    // That API is Swift-only (for EEG integration).
+
+    private let signalNames: Set<String> = ["sine", "saw", "isaw", "tri", "square", "cosine", "rand", "perlin"]
+
+    /// Parse a string that looks like a signal expression.
+    /// Returns nil if the string is not a signal expression (so callers can fall back to number/mini-notation).
+    private func parseSignalExpression(_ s: String) -> Pattern<Double>? {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Must start with a known signal name
+        let base: Pattern<Double>
+        var rest: String
+
+        if trimmed.hasPrefix("sine") {
+            base = sine
+            rest = String(trimmed.dropFirst("sine".count))
+        } else if trimmed.hasPrefix("isaw") {
+            base = isaw
+            rest = String(trimmed.dropFirst("isaw".count))
+        } else if trimmed.hasPrefix("saw") {
+            base = saw
+            rest = String(trimmed.dropFirst("saw".count))
+        } else if trimmed.hasPrefix("tri") {
+            base = tri
+            rest = String(trimmed.dropFirst("tri".count))
+        } else if trimmed.hasPrefix("square") {
+            base = square
+            rest = String(trimmed.dropFirst("square".count))
+        } else if trimmed.hasPrefix("cosine") {
+            base = cosine
+            rest = String(trimmed.dropFirst("cosine".count))
+        } else if trimmed.hasPrefix("rand") {
+            base = rand
+            rest = String(trimmed.dropFirst("rand".count))
+        } else if trimmed.hasPrefix("perlin") {
+            base = perlin
+            rest = String(trimmed.dropFirst("perlin".count))
+        } else {
+            return nil
+        }
+
+        // Apply chained methods
+        var current = base
+        rest = rest.trimmingCharacters(in: .whitespaces)
+        while rest.hasPrefix(".") {
+            rest = String(rest.dropFirst()) // drop the leading "."
+            // Parse method name
+            var methodName = ""
+            while let ch = rest.first, ch.isLetter || ch.isNumber || ch == "_" {
+                methodName.append(ch)
+                rest = String(rest.dropFirst())
+            }
+            rest = rest.trimmingCharacters(in: .whitespaces)
+            guard rest.hasPrefix("(") else { break }
+            rest = String(rest.dropFirst()) // drop "("
+            // Extract args up to matching ")"
+            if let (argsStr, remaining) = extractParenContentSimple(rest) {
+                rest = remaining.trimmingCharacters(in: .whitespaces)
+                let argParts = argsStr.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                switch methodName {
+                case "range":
+                    if argParts.count == 2,
+                       let a = parseDouble(argParts[0]),
+                       let b = parseDouble(argParts[1]) {
+                        current = current.range(a, b)
+                    }
+                case "rangex":
+                    if argParts.count == 2,
+                       let a = parseDouble(argParts[0]),
+                       let b = parseDouble(argParts[1]) {
+                        current = current.rangex(a, b)
+                    }
+                case "slow":
+                    if argParts.count == 1, let f = parseDouble(argParts[0]) {
+                        current = current.slow(f)
+                    }
+                case "fast":
+                    if argParts.count == 1, let f = parseDouble(argParts[0]) {
+                        current = current.fast(f)
+                    }
+                case "segment", "seg":
+                    if argParts.count == 1, let n = Int(argParts[0]) {
+                        current = current.segment(n)
+                    }
+                default:
+                    print("[CodeParser] Signal chain: unknown method '\(methodName)' — skipping")
+                }
+            } else {
+                break
+            }
+        }
+        return current
+    }
+
+    /// Simple paren content extractor: extracts content up to matching ')'.
+    /// Returns (content, rest) or nil on parse error.
+    private func extractParenContentSimple(_ s: String) -> (String, String)? {
+        var depth = 0
+        var content = ""
+        var idx = s.startIndex
+        while idx < s.endIndex {
+            let ch = s[idx]
+            if ch == "(" { depth += 1; content.append(ch) }
+            else if ch == ")" {
+                if depth == 0 {
+                    idx = s.index(after: idx)
+                    return (content, String(s[idx...]))
+                }
+                depth -= 1
+                content.append(ch)
+            } else {
+                content.append(ch)
+            }
+            idx = s.index(after: idx)
+        }
+        return nil
+    }
+
     // MARK: - Comment stripping
 
     private func stripLineCommentsFromLine(_ line: String) -> String {
@@ -244,7 +378,10 @@ public struct CodeParser {
         "chorus", "phaser",
         // Fase 5: bank + ADSR aliases
         "bank",
-        "dec", "att", "sus", "rel"
+        "dec", "att", "sus", "rel",
+        // P0-2: Señales continuas — names used as top-level expressions in signal args
+        "sine", "saw", "isaw", "tri", "square", "cosine", "rand", "perlin",
+        "range", "rangex", "segment", "seg"
     ]
 
     private let friendlyUnknown: Set<String> = [
@@ -310,29 +447,33 @@ public struct CodeParser {
             case "gain":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.gain(v) }
-                    else                      { pattern = pattern.gain(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.gain(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.gain(sig) }
+                    else                            { pattern = pattern.gain(unquote(t)) }
                 }
 
             case "room":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.room(v) }
-                    else                      { pattern = pattern.room(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.room(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.room(sig) }
+                    else                            { pattern = pattern.room(unquote(t)) }
                 }
 
             case "cutoff":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.cutoff(v) }
-                    else                      { pattern = pattern.cutoff(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.cutoff(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.cutoff(sig) }
+                    else                            { pattern = pattern.cutoff(unquote(t)) }
                 }
 
             case "pan":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.pan(v) }
-                    else                      { pattern = pattern.pan(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.pan(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.pan(sig) }
+                    else                            { pattern = pattern.pan(unquote(t)) }
                 }
 
             case "delay":
@@ -399,30 +540,34 @@ public struct CodeParser {
             case "lpf":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.lpf(v) }
-                    else                      { pattern = pattern.lpf(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.lpf(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.lpf(sig) }
+                    else                            { pattern = pattern.lpf(unquote(t)) }
                 }
 
             case "hpf":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.hpf(v) }
-                    else                      { pattern = pattern.hpf(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.hpf(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.hpf(sig) }
+                    else                            { pattern = pattern.hpf(unquote(t)) }
                 }
 
             case "resonance":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.resonance(v) }
-                    else                      { pattern = pattern.resonance(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.resonance(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.resonance(sig) }
+                    else                            { pattern = pattern.resonance(unquote(t)) }
                 }
 
             // ── Fase 3: speed ─────────────────────────────────────────────────
             case "speed":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = parseDouble(t) { pattern = pattern.speed(v) }
-                    else                      { pattern = pattern.speed(unquote(t)) }
+                    if let v = parseDouble(t)       { pattern = pattern.speed(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.speed(sig) }
+                    else                            { pattern = pattern.speed(unquote(t)) }
                 }
 
             case "scale":

@@ -91,12 +91,24 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["gain": .double(Double($0) ?? 1.0)] })
     }
 
+    /// Modulate gain with a continuous signal Pattern<Double>.
+    /// The signal is evaluated at each event's onset (whole.begin via appLeft semantics).
+    /// Example: .gain(sine) → gain follows a 0..1 sine curve per cycle.
+    public func gain(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("gain"))
+    }
+
     public func room(_ value: Double) -> ControlPattern {
         withControl(.pure(["room": .double(value)]))
     }
 
     public func room(_ pattern: String) -> ControlPattern {
         withControl(parseMini(pattern).map { ["room": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// Modulate room with a continuous signal Pattern<Double>.
+    public func room(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("room"))
     }
 
     public func cutoff(_ value: Double) -> ControlPattern {
@@ -107,12 +119,22 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["cutoff": .double(Double($0) ?? 20000.0)] })
     }
 
+    /// Modulate cutoff with a continuous signal Pattern<Double>.
+    public func cutoff(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("cutoff"))
+    }
+
     public func pan(_ value: Double) -> ControlPattern {
         withControl(.pure(["pan": .double(value)]))
     }
 
     public func pan(_ pattern: String) -> ControlPattern {
         withControl(parseMini(pattern).map { ["pan": .double(Double($0) ?? 0.5)] })
+    }
+
+    /// Modulate pan with a continuous signal Pattern<Double>.
+    public func pan(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("pan"))
     }
 
     public func s(_ pattern: String) -> ControlPattern {
@@ -192,6 +214,14 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["lpf": .double(Double($0) ?? 20000.0)] })
     }
 
+    /// Modulate lpf with a continuous signal Pattern<Double>.
+    /// Example: .lpf(sine.range(200, 2000)) → smooth filter sweep.
+    /// Per-event value: evaluated at event whole.begin (see COMPATIBILITY.md).
+    /// Intra-event smoothing (per-sample interpolation) arrives with P0-3.
+    public func lpf(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("lpf"))
+    }
+
     /// hpf — high-pass filter frequency (Hz).
     public func hpf(_ value: Double) -> ControlPattern {
         withControl(.pure(["hpf": .double(value)]))
@@ -199,6 +229,11 @@ extension Pattern where T == [String: ControlValue] {
 
     public func hpf(_ pattern: String) -> ControlPattern {
         withControl(parseMini(pattern).map { ["hpf": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// Modulate hpf with a continuous signal Pattern<Double>.
+    public func hpf(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("hpf"))
     }
 
     /// resonance — filter Q (0..50 per Strudel public docs). Applied to lpf/hpf.
@@ -210,6 +245,11 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["resonance": .double(Double($0) ?? 0.0)] })
     }
 
+    /// Modulate resonance with a continuous signal Pattern<Double>.
+    public func resonance(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("resonance"))
+    }
+
     /// speed — sample playback rate (1=normal, 2=double speed, 0.5=half).
     /// Negative: reverse not supported (documented). Multiplied with note repitch.
     public func speed(_ value: Double) -> ControlPattern {
@@ -218,6 +258,11 @@ extension Pattern where T == [String: ControlValue] {
 
     public func speed(_ pattern: String) -> ControlPattern {
         withControl(parseMini(pattern).map { ["speed": .double(Double($0) ?? 1.0)] })
+    }
+
+    /// Modulate speed with a continuous signal Pattern<Double>.
+    public func speed(_ signal: Pattern<Double>) -> ControlPattern {
+        withControl(signal.asControl("speed"))
     }
 
     // MARK: - Fase 4: Distortion / Saturation

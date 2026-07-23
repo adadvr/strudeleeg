@@ -33,6 +33,10 @@ const strudelSilence = _sil;
 const euclidPath = pathToFileURL(path.join(WEB_MODS, '@strudel/core/euclid.mjs')).href;
 const { euclid, euclidRot } = await import(euclidPath);
 
+// ── Import signals from @strudel/core ───────────────────────────────────────
+const signalPath = pathToFileURL(path.join(WEB_MODS, '@strudel/core/signal.mjs')).href;
+const { signal, sine, saw, isaw, tri, square, cosine, segment } = await import(signalPath);
+
 // ── Fraction → "n/d" string ──────────────────────────────────────────────────
 function fracToString(f) {
   if (f == null) return null;
@@ -829,6 +833,55 @@ const CASES = [
     spanCycles: 1,
     build() {
       return fastcat(pure({ note: 57 }), pure({ note: 59 }));
+    },
+  },
+
+  // ── P0-2: Señales continuas — oracle fixtures ────────────────────────────────
+  // Signal semantics (public docs / source): signal(func) evaluates func at
+  // state.span.BEGIN (not midpoint). whole=undefined (no discrete structure).
+
+  {
+    // sine.segment(8) — discretizes sine into 8 haps per cycle
+    // Each hap: part=[k/8, (k+1)/8), value=sine sampled at t=k/8
+    // sine(t) = (sin(2π*t) + 1) / 2
+    label: 'sine.segment(8)',
+    spanCycles: 1,
+    build() {
+      return sine.segment(8);
+    },
+  },
+
+  {
+    // saw.range(2,4).segment(4) — saw discretized and scaled
+    // saw(t) = t%1, range(2,4): v * (4-2) + 2 = v*2+2
+    // segment(4): t=0/4=0 → 0*2+2=2, t=1/4 → 0.25*2+2=2.5, t=2/4 → 0.5*2+2=3, t=3/4 → 0.75*2+2=3.5
+    label: 'saw.range(2,4).segment(4)',
+    spanCycles: 1,
+    build() {
+      return saw.range(2, 4).segment(4);
+    },
+  },
+
+  {
+    // sine.slow(2).segment(8) — slow(2) stretches over 2 cycles, segment(8) per cycle
+    // Queries span [0,2) so that 2 cycles are captured (8 haps per cycle = 16 total)
+    label: 'sine.slow(2).segment(8)',
+    spanCycles: 2,
+    build() {
+      return sine.slow(2).segment(8);
+    },
+  },
+
+  {
+    // s("bd*4").gain(sine) — gain modulated by sine per event
+    // bd*4: 4 events at [0,1/4), [1/4,1/2), [1/2,3/4), [3/4,1)
+    // Each event's whole=[k/4,(k+1)/4); signal is queried at whole.begin=k/4
+    // sine(0/4)=0.5, sine(1/4)=1.0, sine(2/4)=0.5, sine(3/4)=0.0
+    label: 's("bd*4").gain(sine)',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({s:'bd'}), pure({s:'bd'}), pure({s:'bd'}), pure({s:'bd'}))
+        .set(sine.fmap(v => ({ gain: v })));
     },
   },
 ];

@@ -22,7 +22,29 @@ struct FixtureSpan: Decodable {
 struct FixtureHap: Decodable {
     let whole: FixtureSpan?
     let part: FixtureSpan
+    /// Value may be a dict (ControlPattern fixture) or a bare number (signal fixture).
+    /// Signal segment fixtures have bare numeric values; they are skipped in testOracleFixtures.
     let value: [String: JSONValue]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        whole = try container.decodeIfPresent(FixtureSpan.self, forKey: .whole)
+        part  = try container.decode(FixtureSpan.self, forKey: .part)
+        // Value may be a dict or a bare number (signal segment fixture).
+        // For bare numbers, produce an empty dict so the fixture can be decoded
+        // without crashing; signal segment fixtures are skipped in the test.
+        if let dict = try? container.decode([String: JSONValue].self, forKey: .value) {
+            value = dict
+        } else {
+            // Bare numeric value (e.g. signal segment fixture) — store as empty dict.
+            // The fixture will be skipped in testOracleFixtures (skipPatterns set).
+            value = [:]
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case whole, part, value
+    }
 }
 
 struct Fixture: Decodable {
@@ -95,7 +117,19 @@ final class OracleTests: XCTestCase {
         var totalHaps = 0
         var mismatches: [(String, String)] = []
 
+        // Signal-segment fixtures (sine.segment, saw.range.segment, etc.) are not
+        // CodeParser code strings — they produce Pattern<Double>, not ControlPattern.
+        // They are verified in SignalTests.swift (testOracleSine*, testOracleSaw*).
+        let skipPatterns: Set<String> = [
+            "sine.segment(8)",
+            "saw.range(2,4).segment(4)",
+            "sine.slow(2).segment(8)",
+        ]
+
         for fixture in fixtures {
+            // Skip signal-only (non-control) fixtures
+            if skipPatterns.contains(fixture.pattern) { continue }
+
             let pattern: ControlPattern
             do {
                 pattern = try parser.parse(fixture.pattern)
