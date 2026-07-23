@@ -287,6 +287,7 @@ final class SynthVoice {
     private(set) var isActive: Bool = false
     private var freq:    Double = 440.0
     private var gain:    Double = 1.0
+    private var postgain: Double = 1.0   // P1-8: post-effects gain multiplier
     private var atkSamp: Int    = 0    // attack  in samples
     private var decSamp: Int    = 0    // decay   in samples
     private var susLvl:  Double = ADSRDefaults.sustain
@@ -317,6 +318,21 @@ final class SynthVoice {
     private var hpfRampLeft:   Int    = 0
     private var filterSR:      Double = 44100.0    // cached sample rate for coef calc
 
+    // P1-6: lpenv / hpenv — envelope-modulated filter cutoff
+    // lpenvOctaves: amount of cutoff modulation in octaves (positive = opens up).
+    // lpfBaseHz: static lpf value from the hap (before env modulation).
+    // hpenvOctaves, hpfBaseHz: symmetric for hpf.
+    // Envelope-tracking block size: 64 samples (same as ramp size).
+    // Each block: effective_cutoff = base * 2^(lpenv * env_level)
+    // coefs recomputed every 64 samples (not per-sample — documented: 64-sample blocks).
+    private var lpenvOctaves:  Double = 0.0
+    private var hpenvOctaves:  Double = 0.0
+    private var lpfBaseHz:     Double = 20000.0   // base lpf (before env mod)
+    private var hpfBaseHz:     Double = 20.0      // base hpf (before env mod)
+    private var lpenvBlockLeft: Int   = 0          // samples until next coef update
+    private var hpenvBlockLeft: Int   = 0
+    private static let envBlockSize: Int = 64      // block size for envelope-modulated coef update
+
     // ── Oscillator state ────────────────────────────────────────────────────
     private var phase:    Double = 0.0
     private var dt:       Double = 0.0  // phase increment per sample
@@ -341,6 +357,8 @@ final class SynthVoice {
     ///   Cutoff is set immediately at trigger time (no ramp on the first note);
     ///   subsequent events that reuse this voice will ramp from the previous cutoff
     ///   over 64 samples to prevent clicks.
+    /// P1-6: lpenvOct/hpenvOct — envelope-modulated filter in octaves. 0 = no modulation.
+    /// P1-8: postgainMult — post-effects gain multiplier (default 1.0).
     func trigger(
         waveform:         String,
         freq:             Double,
@@ -356,10 +374,14 @@ final class SynthVoice {
         crushBits:        Double = 0.0,
         lpfHz:            Double? = nil,
         hpfHz:            Double? = nil,
-        resonanceQ:       Double? = nil
+        resonanceQ:       Double? = nil,
+        lpenvOct:         Double  = 0.0,
+        hpenvOct:         Double  = 0.0,
+        postgainMult:     Double  = 1.0
     ) {
         self.freq             = freq
         self.gain             = gain
+        self.postgain         = max(0.0, postgainMult)
         self.waveform         = waveform.lowercased()
         self.dt               = freq / sampleRate
         self.startHostSeconds = startHostSeconds
@@ -441,6 +463,16 @@ final class SynthVoice {
             hpfTarget  = 20.0
             hpfRampLeft = 0
         }
+
+        // P1-6: lpenv / hpenv — store base cutoff and env amount.
+        // If lpenv != 0 and lpf is set, the render block will modulate the cutoff
+        // each 64-sample block using the current envelope level.
+        lpenvOctaves   = lpenvOct
+        hpenvOctaves   = hpenvOct
+        lpfBaseHz      = lpfHz ?? 20000.0
+        hpfBaseHz      = hpfHz ?? 20.0
+        lpenvBlockLeft = 0   // force immediate update on first block
+        hpenvBlockLeft = 0
     }
 
     /// Render `frameCount` samples into `buffer`, adding to existing content.
@@ -548,6 +580,56 @@ final class SynthVoice {
                 sample = sin(2.0 * Double.pi * phase)
             }
 
+            // P1-6: lpenv — envelope-modulated LPF cutoff.
+            // Recompute effective cutoff every 64 samples using current env level.
+            // Formula: effective_cutoff = lpfBaseHz * 2^(lpenvOctaves * env)
+            // (positive lpenv: cutoff rises with envelope = brighter at peak)
+            // Coefs are updated in-place (z1/z2 preserved) to avoid clicks.
+            if lpenvOctaves != 0.0 && !lpfFilter.bypass {
+                if lpenvBlockLeft <= 0 {
+                    let envMod    = pow(2.0, lpenvOctaves * env)
+                    let modCutoff = max(1.0, min(lpfBaseHz * envMod, filterSR * 0.4999))
+                    let qC  = max(0.01, min(lpfQ, 50.0))
+                    let w0    = 2.0 * Double.pi * modCutoff / filterSR
+                    let alpha = sin(w0) / (2.0 * qC)
+                    let cosW  = cos(w0)
+                    let b0    = (1.0 - cosW) / 2.0
+                    let b1    = 1.0 - cosW
+                    let b2    = (1.0 - cosW) / 2.0
+                    let a0    = 1.0 + alpha
+                    let a1    = -2.0 * cosW
+                    let a2    = 1.0 - alpha
+                    lpfFilter.nb0 = b0 / a0; lpfFilter.nb1 = b1 / a0; lpfFilter.nb2 = b2 / a0
+                    lpfFilter.na1 = a1 / a0; lpfFilter.na2 = a2 / a0
+                    lpfFilter.bypass = false
+                    lpenvBlockLeft = SynthVoice.envBlockSize
+                }
+                lpenvBlockLeft -= 1
+            }
+
+            // P1-6: hpenv — envelope-modulated HPF cutoff.
+            if hpenvOctaves != 0.0 && !hpfFilter.bypass {
+                if hpenvBlockLeft <= 0 {
+                    let envMod    = pow(2.0, hpenvOctaves * env)
+                    let modCutoff = max(1.0, min(hpfBaseHz * envMod, filterSR * 0.4999))
+                    let qC  = max(0.01, min(hpfQ, 50.0))
+                    let w0    = 2.0 * Double.pi * modCutoff / filterSR
+                    let alpha = sin(w0) / (2.0 * qC)
+                    let cosW  = cos(w0)
+                    let b0    = (1.0 + cosW) / 2.0
+                    let b1    = -(1.0 + cosW)
+                    let b2    = (1.0 + cosW) / 2.0
+                    let a0    = 1.0 + alpha
+                    let a1    = -2.0 * cosW
+                    let a2    = 1.0 - alpha
+                    hpfFilter.nb0 = b0 / a0; hpfFilter.nb1 = b1 / a0; hpfFilter.nb2 = b2 / a0
+                    hpfFilter.na1 = a1 / a0; hpfFilter.na2 = a2 / a0
+                    hpfFilter.bypass = false
+                    hpenvBlockLeft = SynthVoice.envBlockSize
+                }
+                hpenvBlockLeft -= 1
+            }
+
             // P0-3: apply per-voice biquad filters (lowpass then highpass).
             // Smoothing: ramp cutoff from current to target over 64 samples.
             // Each sample updates the cutoff by one step if the ramp is active.
@@ -559,13 +641,7 @@ final class SynthVoice {
                     lpfCurrent += step
                     lpfRampLeft -= 1
                     // Recompute LPF coefs for new cutoff (smooth step each sample)
-                    lpfFilter = biquadLPF(fc: lpfCurrent, q: lpfQ, fs: filterSR)
-                    // Preserve delay-line state from previous iteration — do NOT reset
-                    // (recomputing the filter struct zeroes z1/z2 by default; we must restore)
-                    // Since biquadLPF returns a new struct, we need to copy state back.
-                    // Fix: store z1/z2 before, restore after coef update.
-                    // Actually we can use a simpler approach: update coefs in-place.
-                    // Let's just do a coef-only recalc without touching z1/z2:
+                    // Coef-only recalc without touching z1/z2:
                     let fcC = max(1.0, min(lpfCurrent, filterSR * 0.4999))
                     let qC  = max(0.01, min(lpfQ, 50.0))
                     let w0    = 2.0 * Double.pi * fcC / filterSR
@@ -612,11 +688,12 @@ final class SynthVoice {
                 filteredSample = hpfFilter.process(filteredSample)
             }
 
-            // ── Apply envelope + gain + headroom ───────────────────────────
+            // ── Apply envelope + gain + postgain + headroom ─────────────────
             // Bug 3 fix: synthHeadroom (0.3) keeps synth voices at a level that
             // does not mask drum samples at gain(0.95). Documented approximation;
             // not calibrated bit-for-bit against Web Audio. See COMPATIBILITY.md.
-            var out = Float(filteredSample * env * gain) * synthHeadroom
+            // P1-8: postgain multiplied after filter chain (before headroom).
+            var out = Float(filteredSample * env * gain * postgain) * synthHeadroom
 
             // ── Bitcrusher (Fase 4): applied post-envelope in render block ──
             // Formula: round(s × 2^(bits-1)) / 2^(bits-1) — public domain DSP
@@ -818,6 +895,8 @@ final class SynthLayer {
     /// P0-3: lpfHz/hpfHz/resonanceQ are passed to the voice's biquad filters.
     ///   Each voice has independent biquad state, so two simultaneous events in the
     ///   same layer may have different filter frequencies.
+    /// P1-6: lpenvOct/hpenvOct — filter envelope modulation in octaves.
+    /// P1-8: postgainMult — post-effects gain multiplier.
     func scheduleNote(
         freq:             Double,
         gain:             Double,
@@ -831,7 +910,10 @@ final class SynthLayer {
         crushBits:        Double = 0.0,
         lpfHz:            Double? = nil,
         hpfHz:            Double? = nil,
-        resonanceQ:       Double? = nil
+        resonanceQ:       Double? = nil,
+        lpenvOct:         Double  = 0.0,
+        hpenvOct:         Double  = 0.0,
+        postgainMult:     Double  = 1.0
     ) {
         renderLock.lock()
         defer { renderLock.unlock() }
@@ -861,7 +943,10 @@ final class SynthLayer {
             crushBits:        crushBits,
             lpfHz:            lpfHz,
             hpfHz:            hpfHz,
-            resonanceQ:       resonanceQ
+            resonanceQ:       resonanceQ,
+            lpenvOct:         lpenvOct,
+            hpenvOct:         hpenvOct,
+            postgainMult:     postgainMult
         )
     }
 

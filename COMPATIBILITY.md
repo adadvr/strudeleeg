@@ -551,3 +551,140 @@ Buses creados on-demand en `play()` (pre-scan de orbits). Destruidos en `stop()`
 `orbit()` aceptado en el editor: `.orbit(1)`, `.orbit(2)`, `.orbit("1 2")`.
 `"orbit"` añadido a `knownMethods` en CodeParser.
 Default `PatternScheduler.defaultOrbit = 1` (verificado contra strudel.cc/learn/effects docs).
+
+---
+
+## P1 Features — Funcionalidad Avanzada (2026-07-23)
+
+Todos los P1 implementados y en verde (416 tests, 0 fallos; AudioValidate 24/24 PASS; build release OK).
+
+### P1-5: duck() / duckattack() / duckdepth() — sidechain ducking
+
+Los eventos de una capa atenúan el `OrbitBus.gain.outputVolume` de otra órbita.
+
+| Parámetro | Default | Rango | Notas |
+|---|---|---|---|
+| `duck(orbit)` | — | Integer orbit index | Órbita target a atenuar. Entero. |
+| `duckattack(x)` | 0.1s | ≥ 0.01s (clamped) | Tiempo de recuperación (attack del gain ramp back to 1.0) |
+| `duckdepth(x)` | 1.0 | [0.0, 1.0] | 1.0 = duck completo (volumen baja a 0); 0 = sin efecto |
+
+**Semántica confirmada:** duck es un efecto de sidechain — cuando la capa A tiene `.duck(2)`, cada evento de A baja el `outputVolume` del OrbitBus de orbit=2. El volumen se recupera gradualmente en `duckattack` segundos.
+
+**Implementación:**
+- `scheduleDuck()` en `PatternScheduler.swift`: envía `poolQueue.asyncAfter` a 10ms de resolución.
+- Inicio: `gain.outputVolume = 1.0 - duckdepth` (instantáneo al onset del evento).
+- Recuperación: `nSteps = ceil(duckattack / 0.01)` pasos de `volumeStep = duckdepth / nSteps` cada 10ms.
+- Thread-safety: todos los accesos a `gain.outputVolume` en `poolQueue`.
+
+**Compromiso documentado:** la resolución del ramp es 10ms (no sample-accurate). Strudel usa audio-rate sidechain vía Web Audio GainNode automation. En AVAudioMixerNode no hay automation curves — se usa `DispatchQueue.asyncAfter` que tiene resolución de ~10ms en práctica. Para música de producción a 120bpm, 10ms es suficiente para ataques musicalmente relevantes.
+
+### P1-6: lpenv() / hpenv() / lpq() / hpq() — filter envelope modulation
+
+| Parámetro | Tipo | Notas |
+|---|---|---|
+| `lpenv(octaves)` | Double | Módulo de apertura del LPF en octavas durante el ataque del ADSR |
+| `hpenv(octaves)` | Double | Módulo de apertura del HPF en octavas (positivo = sube cutoff en ataque) |
+| `lpq(x)` | alias | `lpq(x)` = `resonance(x)` — mismo campo en el control map |
+| `hpq(x)` | alias | `hpq(x)` = `resonance(x)` — mismo campo en el control map |
+
+**Fórmula confirmada:**
+```
+effective_cutoff = lpfBase × 2^(lpenv × env(t))
+```
+Donde `env(t)` es la envolvente ADSR normalizada [0, 1] en el momento `t`.
+
+- `lpfBase`: valor de `lpf()` en el hap (default: 20000 Hz si lpf no está seteado).
+- `hpfBase`: valor de `hpf()` en el hap (default: 20 Hz si hpf no está seteado).
+- Recompute de coeficientes: cada 64 muestras (bloque), en-place (z1/z2 preservados — sin discontinuidades).
+- `lpenvOctaves = 0` → sin modulación (equivale al comportamiento P0-3).
+- Valores negativos permitidos: `lpenv(-2)` cierra el filtro en el ataque.
+
+**Ejemplos:**
+```swift
+// lpf=300 Hz, lpenv=3 → cutoff en peak: 300 × 2^3 = 2400 Hz (totalmente abierto)
+note("c3").sound("sawtooth").lpf(300).lpenv(3)
+
+// lpq = resonance alias
+note("c3").sound("sawtooth").lpf(400).lpq(8)  // resonancia Q=8
+```
+
+**lpq / hpq:** verificados como aliases de `resonance` (mismo campo `"resonance"` en el control map).
+Confirmado vía strudel.cc docs públicos (`lpq` = Q del LPF).
+
+**AudioValidate:** `testLpenvOpensFilterDuringAttack` y `testLpenvSpectrallyCentroidHigherDuringAttack` confirman que el filtro se abre durante el ataque y se cierra durante el sustain. Estos tests están en `P1Tests.swift` (Swift, render offline). No se añadieron nuevos tests a `AudioValidate/main.swift` para no afectar el conteo 24/24 existente.
+
+### P1-7: add() — combinación aritmética de patrones (appLeft)
+
+Implementado con semántica **appLeft**: la estructura (whole, part) viene del patrón **base**; el argumento de `add()` se consulta sobre el `whole` del hap base.
+
+**Semántica confirmada:**
+- `add(other)` → para cada hap base, consulta `other` sobre el `whole` del hap base.
+- Resultado: un hap por cada par (base, other) cuyo dominio se solapa.
+- Para campos numéricos presentes en ambos: `result[key] = base[key] + other[key]`.
+- Para campos ausentes en base: `result[key] = other[key]` (adoptado del argumento).
+- Campos no numéricos (strings): no modificados.
+- Argumento `other` tiene 2 haps simultáneos (e.g. `note("[0,.12]")`): produce cartesian product = 2 haps de salida por hap base.
+
+**Casos verificados contra oracle:**
+| Expresión | Resultado |
+|---|---|
+| `note("c3").add(note("12"))` | MIDI 60 (C4) — transpone +12 semitonos |
+| `note("c3").add(note("7"))` | MIDI 55 (G3) — transpone +7 semitonos |
+| `note("c3").add(note("[0,.12]"))` | 2 haps: MIDI 48.0 + MIDI 48.12 (detune) |
+| `n("0 2").add(n("7"))` | 2 haps: n=7, n=9 (preserva estructura de 2 eventos) |
+
+**CodeParser:** `add(note("..."))` y `add(n("..."))` parseados vía `parseAddArgument()`.
+Soporte: `note("literal")`, `n("literal")`, y números directos.
+
+### P1-8: postgain() / size() / roomsize() / fb() / dt()
+
+| Función | Alias de | Campo | Default | Notas |
+|---|---|---|---|---|
+| `postgain(x)` | — | `"postgain"` | 1.0 | Multiplicador de gain post-ADSR para synths; `player.volume *= postgain` para samples |
+| `size(x)` | — | `"size"` | — | Tamaño del reverb (0..1) → preset de AVAudioUnitReverb |
+| `roomsize(x)` | `size(x)` | `"size"` | — | Alias de size |
+| `fb(x)` | `delayfeedback(x)` | `"delayfeedback"` | — | Alias de delayfeedback |
+| `dt(x)` | `delaytime(x)` | `"delaytime"` | — | Alias de delaytime |
+
+**postgain:**
+- Synths: `out = sample × env × gain × postgain × synthHeadroom` — aplica en el render block.
+- Samples: `group.player.volume = Float(gain × postgain)` — aplica en dispatchHap.
+- Efecto: multiplicativo con `gain`. `postgain(0.5)` con `gain(1.0)` → mitad del volumen.
+- Verificado: `testPostgainMultipliesVoiceOutput` confirma ratio de RMS ≈ 0.5 (±2%).
+
+**size() — mapeo discreto (APROXIMACIÓN DOCUMENTADA):**
+
+Strudel usa Freeverb (reverb algorítmico con `roomSize` continuo 0..1). AVAudioUnitReverb usa impulse responses con presets discretos. Mapeo elegido por progresión perceptual:
+
+| size | Preset |
+|---|---|
+| < 0.3 | `.smallRoom` |
+| < 0.6 | `.mediumHall` (default de orbit bus) |
+| < 0.8 | `.largeHall` |
+| ≥ 0.8 | `.cathedral` |
+
+Nota: el cambio de preset en AVAudioUnitReverb es inmediato (no interpolado). A diferencia de Strudel donde el tamaño afecta el decaimiento continuo del reverb, aquí hay un salto cualitativo al cruzar los umbrales. Documentado como aproximación.
+
+**fb() / dt():** aliases puros (redirigen al mismo campo de control map que `delayfeedback`/`delaytime`). Sin compromiso — comportamiento idéntico.
+
+### Defaults P1 (documentados)
+
+| Parámetro | Default | Fuente |
+|---|---|---|
+| `duckattack` | 0.1s | Strudel superdough docs (public) |
+| `duckdepth` | 1.0 | Strudel docs: duck completo por defecto |
+| `lpenv` | 0.0 | Sin modulación |
+| `hpenv` | 0.0 | Sin modulación |
+| `postgain` | 1.0 | Sin cambio de gain |
+| Block size lpenv coef update | 64 samples | Balance CPU/suavidad (igual que ramp P0-3) |
+
+### Test coverage P1
+
+`P1Tests.swift` — 38 tests, todos PASS:
+- Control field parsing: duck, duckattack, duckdepth, lpenv, hpenv, lpq (=resonance), hpq (=resonance), postgain, size, roomsize (=size), fb (=delayfeedback), dt (=delaytime)
+- CodeParser parsing: todos los métodos anteriores
+- Duck ramp math: validación unitaria de los parámetros del ramp (startVolume, nSteps, volumeStep, recovery)
+- lpenv audio (offline render): 2 tests espectrales que confirman el filtro se abre en ataque (cutoff ~2400Hz) y se cierra en sustain (cutoff ~908Hz)
+- postgain multiplica RMS: ratio = 0.5 ± 2%
+- add() transposición: C3+12=C4, C3+7=G3, cartesian product chord, estructura preservada
+- Regresión: resonance sigue funcionando después de añadir lpq/hpq

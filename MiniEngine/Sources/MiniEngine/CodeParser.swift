@@ -383,7 +383,15 @@ public struct CodeParser {
         "orbit",
         // P0-2: Señales continuas — names used as top-level expressions in signal args
         "sine", "saw", "isaw", "tri", "square", "cosine", "rand", "perlin",
-        "range", "rangex", "segment", "seg"
+        "range", "rangex", "segment", "seg",
+        // P1-5: duck sidechain
+        "duck", "duckattack", "duckdepth",
+        // P1-6: filter envelope + lpq/hpq
+        "lpenv", "hpenv", "lpq", "hpq",
+        // P1-7: add()
+        "add",
+        // P1-8: postgain, size, roomsize, fb, dt
+        "postgain", "size", "roomsize", "fb", "dt"
     ]
 
     private let friendlyUnknown: Set<String> = [
@@ -755,6 +763,102 @@ public struct CodeParser {
                     else                      { pattern = pattern.rel(unquote(t)) }
                 }
 
+            // ── P1-5: duck sidechain ───────────────────────────────────────
+            case "duck":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.duck(v) }
+                    else                      { pattern = pattern.duck(unquote(t)) }
+                }
+
+            case "duckattack":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.duckattack(v) }
+                    else                      { pattern = pattern.duckattack(unquote(t)) }
+                }
+
+            case "duckdepth":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.duckdepth(v) }
+                    else                      { pattern = pattern.duckdepth(unquote(t)) }
+                }
+
+            // ── P1-6: filter envelope ──────────────────────────────────────
+            case "lpenv":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.lpenv(v) }
+                    else                      { pattern = pattern.lpenv(unquote(t)) }
+                }
+
+            case "hpenv":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.hpenv(v) }
+                    else                      { pattern = pattern.hpenv(unquote(t)) }
+                }
+
+            case "lpq":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t)       { pattern = pattern.lpq(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.resonance(sig) }
+                    else                            { pattern = pattern.lpq(unquote(t)) }
+                }
+
+            case "hpq":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t)       { pattern = pattern.hpq(v) }
+                    else if let sig = parseSignalExpression(t) { pattern = pattern.resonance(sig) }
+                    else                            { pattern = pattern.hpq(unquote(t)) }
+                }
+
+            // ── P1-7: add() ────────────────────────────────────────────────
+            case "add":
+                // Argument: note("...") or n("...") — a sub-pattern call
+                // We parse the argument string as a ControlPattern.
+                // Supported forms: add(note("...")), add(n("...")), add(bare_number)
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let addPat = parseAddArgument(t) {
+                        pattern = pattern.add(addPat)
+                    } else {
+                        print("[CodeParser] 'add' could not parse argument: \(arg)")
+                    }
+                }
+
+            // ── P1-8: postgain, size, roomsize, fb, dt ─────────────────────
+            case "postgain":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.postgain(v) }
+                    else                      { pattern = pattern.postgain(unquote(t)) }
+                }
+
+            case "size", "roomsize":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.size(v) }
+                    else                      { pattern = pattern.size(unquote(t)) }
+                }
+
+            case "fb":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.fb(v) }
+                    else                      { pattern = pattern.fb(unquote(t)) }
+                }
+
+            case "dt":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.dt(v) }
+                    else                      { pattern = pattern.dt(unquote(t)) }
+                }
+
             default:
                 break
             }
@@ -920,6 +1024,43 @@ public struct CodeParser {
             idx = s.index(after: idx)
         }
         throw CodeParseError.syntaxError("Unmatched '(' in expression")
+    }
+
+    // MARK: - add() argument parser
+    //
+    // Parses the argument to .add(...):
+    //   add(note("12"))       → notePattern("12")
+    //   add(note("[0,.12]"))  → notePattern("[0,.12]")
+    //   add(n("7"))           → nPattern("7")
+    //   add(12)               → pure({"note": 12}) — bare number treated as note offset
+    //
+    // Returns nil if the argument cannot be parsed.
+
+    private func parseAddArgument(_ arg: String) -> ControlPattern? {
+        let t = arg.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // note("...") or note('...')
+        if t.hasPrefix("note(") {
+            if let inner = extractSimpleArg(t, fn: "note") {
+                let s = unquote(inner.trimmingCharacters(in: .whitespaces))
+                return notePattern(s)
+            }
+        }
+
+        // n("...")
+        if t.hasPrefix("n(") {
+            if let inner = extractSimpleArg(t, fn: "n") {
+                let s = unquote(inner.trimmingCharacters(in: .whitespaces))
+                return nPattern(s)
+            }
+        }
+
+        // Bare number (e.g. add(12) → add 12 to note field)
+        if let v = parseDouble(t) {
+            return .pure(["note": .double(v)])
+        }
+
+        return nil
     }
 
     // MARK: - Helpers

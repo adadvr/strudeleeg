@@ -144,6 +144,23 @@ final class OrbitBus {
         if let t = time     { delay.delayTime = t }
         if let f = feedback { delay.feedback  = Float(f * 100.0) }
     }
+
+    /// P1-8: size(x) — map continuous room size 0..1 to AVAudioUnitReverb preset.
+    /// Strudel uses a continuous Freeverb-style algorithmic reverb; AVAudioUnitReverb
+    /// uses impulse responses with discrete presets. This mapping gives a perceptually
+    /// plausible "bigger room" progression. Documented approximation.
+    ///   size < 0.3  → .smallRoom
+    ///   size < 0.6  → .mediumHall (default)
+    ///   size < 0.8  → .largeHall
+    ///   size >= 0.8 → .cathedral
+    func applySize(_ size: Double) {
+        let preset: AVAudioUnitReverbPreset
+        if size < 0.3      { preset = .smallRoom  }
+        else if size < 0.6 { preset = .mediumHall }
+        else if size < 0.8 { preset = .largeHall  }
+        else               { preset = .cathedral   }
+        reverb.loadFactoryPreset(preset)
+    }
 }
 
 // MARK: - Layer/name pair
@@ -412,6 +429,16 @@ public final class PatternScheduler {
             let vowelVal      = hap.value["vowel"]?.stringValue
             let beginVal      = hap.value["begin"]?.doubleValue   // chop/striate sample begin (0..1)
             let endVal        = hap.value["end"]?.doubleValue     // chop/striate sample end (0..1)
+            // P1-5: duck sidechain
+            let duckOrbit     = hap.value["duck"]?.doubleValue         // target orbit index
+            let duckAttackVal = hap.value["duckattack"]?.doubleValue ?? 0.1  // recovery seconds
+            let duckDepthVal  = hap.value["duckdepth"]?.doubleValue  ?? 1.0  // 0..1 depth
+            // P1-6: filter envelope modulation
+            let lpenvVal      = hap.value["lpenv"]?.doubleValue ?? 0.0   // octaves
+            let hpenvVal      = hap.value["hpenv"]?.doubleValue ?? 0.0
+            // P1-8: postgain, size
+            let postgainVal   = hap.value["postgain"]?.doubleValue ?? 1.0
+            let sizeVal       = hap.value["size"]?.doubleValue
 
             // Event duration in cycle units (for ADSR note duration)
             let hapDurationCycles = (hap.whole ?? hap.part).end.toDouble
@@ -423,8 +450,15 @@ public final class PatternScheduler {
                 // P0-4: update orbit bus room/delay with this event's values (last wins per orbit).
                 let orbitBus = buildOrbitBus(orbitIdx: orbitVal)
                 if let r = roomValue { orbitBus.applyRoom(r) }
+                if let s = sizeVal   { orbitBus.applySize(s) }    // P1-8: size → reverb preset
                 if let d = delayValue {
                     orbitBus.applyDelay(wet: d, time: delayTimeVal, feedback: delayFeedVal)
+                }
+                // P1-5: duck sidechain — attenuate target orbit bus gain at this event onset.
+                if let dOrbit = duckOrbit {
+                    let targetBus = buildOrbitBus(orbitIdx: Int(dOrbit))
+                    scheduleDuck(on: targetBus, depth: duckDepthVal, attackSec: duckAttackVal,
+                                 atHostSeconds: absoluteTime)
                 }
                 dispatchSynthHap(
                     synthName:    sName,
@@ -444,15 +478,25 @@ public final class PatternScheduler {
                     shape:        shapeVal,
                     distort:      distortVal,
                     crush:        crushVal,
-                    vowel:        vowelVal
+                    vowel:        vowelVal,
+                    lpenv:        lpenvVal,
+                    hpenv:        hpenvVal,
+                    postgain:     postgainVal
                 )
             } else {
                 // ── Sample route ────────────────────────────────────────────
                 // P0-4: update orbit bus room/delay with this event's values (last wins per orbit).
                 let orbitBus = buildOrbitBus(orbitIdx: orbitVal)
                 if let r = roomValue { orbitBus.applyRoom(r) }
+                if let s = sizeVal   { orbitBus.applySize(s) }    // P1-8: size → reverb preset
                 if let d = delayValue {
                     orbitBus.applyDelay(wet: d, time: delayTimeVal, feedback: delayFeedVal)
+                }
+                // P1-5: duck sidechain — attenuate target orbit bus gain at this event onset.
+                if let dOrbit = duckOrbit {
+                    let targetBus = buildOrbitBus(orbitIdx: Int(dOrbit))
+                    scheduleDuck(on: targetBus, depth: duckDepthVal, attackSec: duckAttackVal,
+                                 atHostSeconds: absoluteTime)
                 }
                 // Detect explicit ADSR parameters (nil = use default/no-op)
                 // If NONE of attack/decay/sustain/release are set by the user,
@@ -480,6 +524,7 @@ public final class PatternScheduler {
                     vowel:         vowelVal,
                     beginFrac:     beginVal,
                     endFrac:       endVal,
+                    postgain:      postgainVal,
                     // ADSR for samples (only when explicitly set)
                     attack:        hasExplicitADSR ? (attackVal  ?? ADSRDefaults.attack)  : nil,
                     decay:         hasExplicitADSR ? (decayVal   ?? ADSRDefaults.decay)   : nil,
@@ -512,6 +557,7 @@ public final class PatternScheduler {
         vowel:         String? = nil,
         beginFrac:     Double? = nil,   // chop/striate: sample start 0..1
         endFrac:       Double? = nil,   // chop/striate: sample end 0..1
+        postgain:      Double  = 1.0,   // P1-8: post-effects gain multiplier
         // ADSR for samples — nil = no envelope (backward-compat, no change in sound)
         attack:        Double? = nil,
         decay:         Double? = nil,
@@ -549,7 +595,9 @@ public final class PatternScheduler {
         let rate = Float(noteRate * (speed ?? 1.0))
 
         // Apply per-event gain
-        group.player.volume = Float(gain)
+        // P1-8: postgain applied multiplicatively with gain (both pre-orbit-bus).
+        // For samples, gain and postgain are equivalent in signal position (documented compromise).
+        group.player.volume = Float(gain * postgain)
 
         // Apply pan: Strudel 0..1 → AVAudioMixerNode.pan -1..1
         if let p = pan {
@@ -671,7 +719,10 @@ public final class PatternScheduler {
         shape:        Double? = nil,
         distort:      Double? = nil,
         crush:        Double? = nil,
-        vowel:        String? = nil
+        vowel:        String? = nil,
+        lpenv:        Double  = 0.0,   // P1-6: filter envelope modulation (octaves)
+        hpenv:        Double  = 0.0,
+        postgain:     Double  = 1.0    // P1-8: post-effects gain multiplier
     ) {
         // Bug 1 fix: chain key is layer-qualified so each stack branch has its own
         // SynthLayer (own voice pool + own EQ/reverb/delay/panner chain).
@@ -722,7 +773,10 @@ public final class PatternScheduler {
             crushBits:        crush ?? 0.0,
             lpfHz:            lpf,
             hpfHz:            hpf,
-            resonanceQ:       resonance
+            resonanceQ:       resonance,
+            lpenvOct:         lpenv,
+            hpenvOct:         hpenv,
+            postgainMult:     postgain
         )
     }
 
@@ -963,6 +1017,51 @@ public final class PatternScheduler {
             return buf
         }
         return out
+    }
+
+    // MARK: - P1-5: Duck sidechain
+
+    /// Schedule a gain-duck ramp on the target orbit bus.
+    ///
+    /// At `atHostSeconds` the orbit bus gain drops instantly to (1 - depth).
+    /// Then it recovers linearly to 1.0 over `attackSec` seconds.
+    ///
+    /// Implementation: the ramp is driven by the poolQueue timer via a series of
+    /// DispatchQueue.asyncAfter calls scheduled at 10ms intervals.
+    /// Step resolution: 10ms (100 steps/sec). Documented approximation.
+    ///
+    /// Parameters:
+    ///   targetBus:     the orbit bus whose gain node is attenuated.
+    ///   depth:         attenuation depth 0..1. 1 = full silence, 0 = no duck.
+    ///   attackSec:     recovery time in seconds (time to return from duck to 1.0).
+    ///   atHostSeconds: absolute host-clock time (same as hostTimeNow) for the duck onset.
+    private func scheduleDuck(on targetBus: OrbitBus, depth: Double, attackSec: Double,
+                               atHostSeconds: Double) {
+        let depthClamped  = max(0.0, min(1.0, depth))
+        let attackClamped = max(0.01, attackSec)
+        let startVolume   = 1.0 - depthClamped   // volume immediately after duck
+        let stepIntervalMs = 10.0                 // 10ms resolution (documented)
+        let stepIntervalSec = stepIntervalMs / 1000.0
+        let nSteps = max(1, Int(ceil(attackClamped / stepIntervalSec)))
+        let volumeStep = (1.0 - startVolume) / Double(nSteps)  // volume increment per step
+
+        // Compute delay from now to the duck onset
+        let nowSec = hostTimeNow()
+        let onsetDelay = max(0.0, atHostSeconds - nowSec)
+
+        // Schedule the initial drop
+        poolQueue.asyncAfter(deadline: .now() + onsetDelay) { [weak targetBus] in
+            targetBus?.gain.outputVolume = Float(startVolume)
+        }
+
+        // Schedule recovery steps
+        for step in 1...nSteps {
+            let stepDelay = onsetDelay + Double(step) * stepIntervalSec
+            let stepVolume = min(1.0, startVolume + volumeStep * Double(step))
+            poolQueue.asyncAfter(deadline: .now() + stepDelay) { [weak targetBus] in
+                targetBus?.gain.outputVolume = Float(stepVolume)
+            }
+        }
     }
 
     // MARK: - Time utilities

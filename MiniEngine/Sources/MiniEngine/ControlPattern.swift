@@ -372,6 +372,228 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["orbit": .double(Double($0) ?? 1.0)] })
     }
 
+    // MARK: - P1-5: duck / duckattack / duckdepth (sidechain)
+
+    /// duck(n) — events on this pattern attenuate the gain of orbit bus n.
+    /// At each event onset: orbit n's gain drops to (1 - duckdepth) immediately,
+    /// then recovers linearly over duckattack seconds.
+    ///
+    /// Semantics (Strudel public docs / superdough):
+    ///   duck(n): target orbit index to attenuate.
+    ///   duckattack: recovery time in seconds (default: 0.1s — recovery from duck to full).
+    ///     Note: in Strudel, "duckattack" refers to the recovery (not the onset drop),
+    ///     per the superdough source comments. We follow this convention.
+    ///   duckdepth: attenuation depth 0..1. 0 = no ducking, 1 = full silence (default: 1).
+    ///
+    /// Implementation: on event dispatch with duck(n), the scheduler schedules a gain ramp
+    /// on OrbitBus[n].gain: immediately drops to (1-duckdepth) at absoluteTime,
+    /// then recovers to 1.0 over duckattack seconds using poolQueue step interpolation
+    /// at 10ms resolution (100 steps/second). Documented: 10ms step resolution.
+    public func duck(_ value: Double) -> ControlPattern {
+        withControl(.pure(["duck": .double(value)]))
+    }
+
+    public func duck(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["duck": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// duckattack(s) — recovery time after ducking (seconds). Default: 0.1.
+    public func duckattack(_ value: Double) -> ControlPattern {
+        withControl(.pure(["duckattack": .double(value)]))
+    }
+
+    public func duckattack(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["duckattack": .double(Double($0) ?? 0.1)] })
+    }
+
+    /// duckdepth(x) — ducking depth 0..1. 0=no duck, 1=full silence. Default: 1.
+    public func duckdepth(_ value: Double) -> ControlPattern {
+        withControl(.pure(["duckdepth": .double(value)]))
+    }
+
+    public func duckdepth(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["duckdepth": .double(Double($0) ?? 1.0)] })
+    }
+
+    // MARK: - P1-6: lpenv / hpenv (filter envelope)
+
+    /// lpenv(octaves) — modulate lpf cutoff with the voice ADSR envelope.
+    ///
+    /// Effective cutoff at time t: lpf_effective(t) = lpf_base × 2^(lpenv × env(t))
+    /// where env(t) is the ADSR envelope value at sample t (0..1 during attack/decay/sustain,
+    /// 0..sustain during release).
+    ///
+    /// Semantics (superdough public docs / strudel.cc/learn/effects):
+    ///   lpenv in octaves. Positive: cutoff opens upward (brighter) with envelope.
+    ///   Negative: cutoff moves downward (darker) with envelope.
+    ///   0 = no modulation.
+    ///
+    /// Formula confirmed: lpf_effective = lpf_base * 2^(lpenv * env).
+    ///   At env=1.0 (peak attack): lpf * 2^lpenv (lpenv=2 → 4× the base cutoff).
+    ///   At env=0.0 (silence): lpf * 2^0 = lpf (base cutoff).
+    ///
+    /// Synths: coefs recomputed every 64 samples using the current envelope value.
+    ///   This matches the biquad ramp already in SynthVoice; lpenv adds envelope tracking.
+    /// Samples: not applied (sample buffer preprocessing has no ADSR curve access).
+    ///   Documented: lpenv is synth-only in MiniEngine (same as Strudel behaviour).
+    ///
+    /// Default: 0 (no modulation).
+    public func lpenv(_ value: Double) -> ControlPattern {
+        withControl(.pure(["lpenv": .double(value)]))
+    }
+
+    public func lpenv(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["lpenv": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// hpenv(octaves) — same semantics as lpenv but for hpf.
+    ///   hpf_effective(t) = hpf_base × 2^(hpenv × env(t))
+    public func hpenv(_ value: Double) -> ControlPattern {
+        withControl(.pure(["hpenv": .double(value)]))
+    }
+
+    public func hpenv(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["hpenv": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// lpq(q) — Q of the low-pass filter.
+    /// Alias of resonance() for the lpf specifically.
+    /// Strudel public docs: lpq and resonance are aliases for lpf Q.
+    /// Verified: strudel.cc/learn/effects shows lpq as the Q parameter for lpf.
+    /// Implementation: stores as "resonance" control field (same effect as resonance()).
+    public func lpq(_ value: Double) -> ControlPattern {
+        resonance(value)
+    }
+
+    public func lpq(_ pattern: String) -> ControlPattern {
+        resonance(pattern)
+    }
+
+    /// hpq(q) — Q of the high-pass filter.
+    /// Alias of resonance() for hpf. Same implementation (single resonance Q shared).
+    /// Strudel docs: hpq exists as a symmetric alias to lpq for hpf.
+    public func hpq(_ value: Double) -> ControlPattern {
+        resonance(value)
+    }
+
+    public func hpq(_ pattern: String) -> ControlPattern {
+        resonance(pattern)
+    }
+
+    // MARK: - P1-7: add() — arithmetic pattern combination
+
+    /// add(other: ControlPattern) — structural addition of numeric control fields.
+    ///
+    /// Semantics (Strudel / Tidal public docs):
+    ///   appLeft ("add"): structure from BASE pattern; values from OTHER are added
+    ///   field-by-field when the field exists in both patterns and both values are numeric.
+    ///   Non-numeric fields (strings) are NOT added; the base wins.
+    ///
+    ///   Key use cases:
+    ///     .add(note("12"))     → transpose: adds 12 to "note" field (one octave up)
+    ///     .add(note("[0,.12]"))→ detune: two simultaneous events (+0, +0.12 MIDI semitones)
+    ///     .add(n("7"))         → shift scale degree before .scale() resolves
+    ///
+    ///   Structure: structure comes from BASE (appLeft).
+    ///   When other has multiple haps (e.g. note("[0,.12]") = chord = 2 haps), each base
+    ///   hap is duplicated to combine with each other hap — resulting in base.count × other.count
+    ///   output haps. This is the "app" in applicative: base × other cartesian product,
+    ///   filtered by overlap. (Verified against oracle: see P1-7 tests.)
+    ///
+    /// Implementation: for each base hap, query other over base's whole span.
+    ///   For each (base_hap, other_hap) with overlapping wholes:
+    ///     new_whole = base_hap.whole (structure from base)
+    ///     new_part  = intersection(base_hap.part, other_hap.whole)
+    ///     new_value = base_value with numeric fields incremented by other_value amounts
+    public func add(_ other: ControlPattern) -> ControlPattern {
+        Pattern { span in
+            let baseHaps = self.query(span)
+            var result: [Hap<[String: ControlValue]>] = []
+
+            for baseHap in baseHaps {
+                let querySpan = baseHap.whole ?? baseHap.part
+                let otherHaps = other.query(querySpan)
+
+                for otherHap in otherHaps {
+                    let otherExtent = otherHap.whole ?? otherHap.part
+                    guard let newPart = baseHap.part.intersection(otherExtent) else { continue }
+                    // Merge: add numeric fields, keep string fields from base
+                    var merged = baseHap.value
+                    for (key, otherVal) in otherHap.value {
+                        if let baseVal = merged[key],
+                           let bd = baseVal.doubleValue,
+                           let od = otherVal.doubleValue {
+                            merged[key] = .double(bd + od)
+                        }
+                        // If base has no such field, add it from other (additive default)
+                        else if merged[key] == nil, let od = otherVal.doubleValue {
+                            merged[key] = .double(od)
+                        }
+                        // String fields from other: skip (base string wins — e.g. "s")
+                    }
+                    result.append(Hap(whole: baseHap.whole, part: newPart, value: merged))
+                }
+            }
+            return result
+        }
+    }
+
+    // MARK: - P1-8: postgain, size, fb/dt aliases
+
+    /// postgain(x) — post-effects gain multiplier.
+    ///
+    /// Semantics: multiplier applied after the effect chain.
+    ///   Synths: multiplied after filter/crush in SynthVoice render (implemented as a
+    ///     second gain factor applied to each sample output, before accumulation).
+    ///   Samples: multiplied into player.volume at dispatch time. Because samples are
+    ///     preprocessed (lpf/crush applied as buffer copy), postgain is applied after
+    ///     those but before the orbit bus (same signal point as gain in practice — no
+    ///     distortion-after-postgain distinction is possible without a per-voice AU chain).
+    ///     Documented compromise: for samples, gain and postgain are equivalent except
+    ///     they stack multiplicatively (both are applied).
+    public func postgain(_ value: Double) -> ControlPattern {
+        withControl(.pure(["postgain": .double(value)]))
+    }
+
+    public func postgain(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["postgain": .double(Double($0) ?? 1.0)] })
+    }
+
+    /// size(x) — reverb room size 0..1.
+    ///
+    /// Alias: roomsize.
+    ///
+    /// Semantics: maps to AVAudioUnitReverb preset per orbit bus.
+    ///   Strudel uses a continuous size parameter; AVAudioUnitReverb has discrete presets.
+    ///   Mapping (documented approximation):
+    ///     size < 0.3  → .smallRoom
+    ///     size < 0.6  → .mediumHall (default)
+    ///     size < 0.8  → .largeHall
+    ///     size >= 0.8 → .cathedral
+    ///   Documented: this is an approximation. Strudel's reverb uses a continuous
+    ///   algorithmic reverb (Freeverb-style); AVAudioUnitReverb uses impulse responses.
+    ///   The preset mapping gives a perceptually similar "bigger room" progression.
+    ///   Updated per event on the orbit bus (last event per orbit wins, same as room).
+    public func size(_ value: Double) -> ControlPattern {
+        withControl(.pure(["size": .double(value)]))
+    }
+
+    public func size(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["size": .double(Double($0) ?? 0.5)] })
+    }
+
+    /// roomsize(x) — alias for size(x).
+    public func roomsize(_ value: Double) -> ControlPattern { size(value) }
+    public func roomsize(_ pattern: String) -> ControlPattern { size(pattern) }
+
+    /// fb(x) — alias for delayfeedback(x). Strudel short alias.
+    public func fb(_ value: Double) -> ControlPattern { delayfeedback(value) }
+    public func fb(_ pattern: String) -> ControlPattern { delayfeedback(pattern) }
+
+    /// dt(x) — alias for delaytime(x). Strudel short alias.
+    public func dt(_ value: Double) -> ControlPattern { delaytime(value) }
+    public func dt(_ pattern: String) -> ControlPattern { delaytime(pattern) }
+
     // MARK: - Fase 4: Granular — chop / striate
 
     /// chop(n) — cut each sample event into n sequential sub-events.
