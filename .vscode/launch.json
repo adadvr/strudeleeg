@@ -59,6 +59,26 @@
             "target": "WebProbe",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release WebProbe"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Debug AudioValidate",
+            "target": "AudioValidate",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AudioValidate"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Release AudioValidate",
+            "target": "AudioValidate",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AudioValidate"
         }
     ]
 }

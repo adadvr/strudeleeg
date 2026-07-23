@@ -15,6 +15,10 @@ let package = Package(
             name: "ValidateEvents",
             targets: ["ValidateEvents"]
         ),
+        .executable(
+            name: "AudioValidate",
+            targets: ["AudioValidate"]
+        ),
     ],
     dependencies: [
         .package(path: "MiniEngine"),
@@ -45,6 +49,15 @@ let package = Package(
             name: "WebProbe",
             dependencies: [],
             path: "Sources/WebProbe"
+        ),
+        // Offline audio validation harness: renders MiniEngine synths offline
+        // and verifies spectral peaks with Accelerate/vDSP FFT.
+        .executableTarget(
+            name: "AudioValidate",
+            dependencies: [
+                .product(name: "MiniEngine", package: "MiniEngine"),
+            ],
+            path: "Sources/AudioValidate"
         ),
     ]
 )
