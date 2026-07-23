@@ -56,10 +56,19 @@ final class ProbeDelegate: NSObject, WKNavigationDelegate {
             undefined;
             """
             webView.evaluateJavaScript(hook) { _, _ in
-                let seed = #"stack(s("pad").slow(4).gain(0.5).room(0.6), note("<c4 e4 g4 b4>").s("bell").slow(2).cutoff(1500).room(0.4).gain(0.7))"#
-                let encoded = String(data: try! JSONSerialization.data(withJSONObject: seed, options: [.fragmentsAllowed]), encoding: .utf8)!
-                webView.evaluateJavaScript("window.strudelPlay(\(encoded)); undefined;") { _, err in
-                    if let err { print("[probe] error evaluateJavaScript(play):", err.localizedDescription) }
+                // Test 1: bank-based drum pattern (main verification target)
+                let drumPattern = #"s("bd*4").bank("tr909")"#
+                let drumEncoded = String(data: try! JSONSerialization.data(withJSONObject: drumPattern, options: [.fragmentsAllowed]), encoding: .utf8)!
+                webView.evaluateJavaScript("window.strudelPlay(\(drumEncoded)); undefined;") { _, err in
+                    if let err { print("[probe] error evaluateJavaScript(drumPlay):", err.localizedDescription) }
+                }
+                // Test 2: stack pattern
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    let stackPattern = #"stack(s("bd*4").dec(0.4).gain(0.95), s("~ cp ~ cp").gain(0.5), s("[hh <hh oh>]*4").dec(0.25).gain(0.35))"#
+                    let stackEncoded = String(data: try! JSONSerialization.data(withJSONObject: stackPattern, options: [.fragmentsAllowed]), encoding: .utf8)!
+                    webView.evaluateJavaScript("window.strudelPlay(\(stackEncoded)); undefined;") { _, err in
+                        if let err { print("[probe] error evaluateJavaScript(stackPlay):", err.localizedDescription) }
+                    }
                 }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) { self.diagnose(webView) }
@@ -85,9 +94,21 @@ final class ProbeDelegate: NSObject, WKNavigationDelegate {
         try {
           const base = window.__STRUDEL_BASE_URL__ || new URL('../Samples/', location.href).href;
           r.base = base;
+          // Check pad.wav (original)
           const resp = await fetch(base + 'pad.wav');
           r.fetchOk = resp.ok;
           r.bytes = (await resp.arrayBuffer()).byteLength;
+          // Check drum samples (new)
+          const drumChecks = ['bd.wav','sd.wav','hh.wav','oh.wav','cp.wav',
+                              'tr909/bd.wav','tr909/sd.wav','tr909/hh.wav',
+                              'tr808/bd.wav','tr808/sd.wav'];
+          r.drumFetch = {};
+          for (const name of drumChecks) {
+            try {
+              const dr = await fetch(base + name);
+              r.drumFetch[name] = dr.ok ? 'OK' : ('HTTP ' + dr.status);
+            } catch (e) { r.drumFetch[name] = 'ERR: ' + String(e); }
+          }
         } catch (e) { r.fetchErr = String(e); }
         r.logs = window.__probeLogs || [];
         return JSON.stringify(r);

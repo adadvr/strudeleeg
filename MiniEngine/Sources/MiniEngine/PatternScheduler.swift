@@ -259,7 +259,11 @@ public final class PatternScheduler {
         let haps       = pattern.query(querySpan)
 
         for hap in haps {
-            guard let sName = hap.value["s"]?.stringValue else { continue }
+            guard let sBase = hap.value["s"]?.stringValue else { continue }
+
+            // Resolve bank: if "bank" field present, effective key = "bank_sampleName"
+            let bankName = hap.value["bank"]?.stringValue ?? ""
+            let sName = bankName.isEmpty ? sBase : "\(bankName)_\(sBase)"
 
             // Event absolute time: onset of the hap's part in cycle units → seconds
             let hapCycleOnset = hap.part.begin
@@ -324,6 +328,11 @@ public final class PatternScheduler {
                 )
             } else {
                 // ── Sample route ────────────────────────────────────────────
+                // Detect explicit ADSR parameters (nil = use default/no-op)
+                // If NONE of attack/decay/sustain/release are set by the user,
+                // we skip envelope processing entirely (backward-compat: no change in sound).
+                let hasExplicitADSR = attackVal != nil || decayVal != nil
+                                   || sustainVal != nil || releaseVal != nil
                 dispatchHap(
                     sampleName:    sName,
                     midiNote:      midiNote.map { Int($0) },
@@ -341,7 +350,13 @@ public final class PatternScheduler {
                     crush:         crushVal,
                     vowel:         vowelVal,
                     beginFrac:     beginVal,
-                    endFrac:       endVal
+                    endFrac:       endVal,
+                    // ADSR for samples (only when explicitly set)
+                    attack:        hasExplicitADSR ? (attackVal  ?? ADSRDefaults.attack)  : nil,
+                    decay:         hasExplicitADSR ? (decayVal   ?? ADSRDefaults.decay)   : nil,
+                    sustain:       hasExplicitADSR ? (sustainVal ?? ADSRDefaults.sustain) : nil,
+                    release:       hasExplicitADSR ? (releaseVal ?? ADSRDefaults.release) : nil,
+                    durationSec:   hasExplicitADSR ? hapDurationSec : nil
                 )
             }
         }
@@ -364,7 +379,13 @@ public final class PatternScheduler {
         crush:         Double? = nil,
         vowel:         String? = nil,
         beginFrac:     Double? = nil,   // chop/striate: sample start 0..1
-        endFrac:       Double? = nil    // chop/striate: sample end 0..1
+        endFrac:       Double? = nil,   // chop/striate: sample end 0..1
+        // ADSR for samples — nil = no envelope (backward-compat, no change in sound)
+        attack:        Double? = nil,
+        decay:         Double? = nil,
+        sustain:       Double? = nil,
+        release:       Double? = nil,
+        durationSec:   Double? = nil
     ) {
         // Lazily create a group for this sample if needed
         if groups[sampleName] == nil {
@@ -463,6 +484,24 @@ public final class PatternScheduler {
         // Fase 4: crush (samples) — quantise buffer before scheduling
         if let bits = crush {
             scheduleBuffer = bitcrushedBuffer(scheduleBuffer, bits: bits)
+        }
+
+        // Fase 5: ADSR envelope over sample buffer (only when explicitly requested).
+        // If attack/decay/sustain/release are all nil, this block is skipped entirely
+        // — no change in sound for patterns that don't use ADSR (backward-compat).
+        // When set: applies an ADSR amplitude envelope to a copy of the buffer.
+        //   Attack  phase: 0 → 1 over first (attack * sampleRate) frames
+        //   Decay   phase: 1 → sustain over next (decay * sampleRate) frames
+        //   Sustain phase: sustain level until (durationSec * sampleRate) frames
+        //   Release phase: sustain → 0 over final (release * sampleRate) frames
+        // Buffers shorter than the envelope are truncated gracefully.
+        if let att = attack, let dec = decay, let sus = sustain, let rel = release {
+            scheduleBuffer = adsrEnvelopeBuffer(
+                scheduleBuffer,
+                sampleRate: scheduleBuffer.format.sampleRate,
+                attack: att, decay: dec, sustain: sus, release: rel,
+                durationSec: durationSec ?? Double(scheduleBuffer.frameLength) / scheduleBuffer.format.sampleRate
+            )
         }
 
         group.varispeed.rate = rate

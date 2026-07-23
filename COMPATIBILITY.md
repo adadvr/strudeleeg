@@ -55,6 +55,14 @@ Living document: function → status → equivalence notes.
 | `striate(n)` | ✅ nativo (Fase 4) | Assigns chunk (i mod n) to event i. Does NOT create new events (different from chop). Event i → begin=i%n/n, end=(i%n+1)/n. Oracle verified: `s("pad").striate(4)` → 1 event (chunk 0); `s("pad bell").striate(2)` → 2 events with interleaved chunks |
 | `chorus` | ❌ no (Fase 4) | Not implemented. See note below |
 | `phaser` | ❌ no (Fase 4) | Not implemented. See note below |
+| `bank("name")` | ✅ nativo (Fase 5) | Sample bank selection. `s("bd").bank("tr909")` → looks up key "tr909_bd". Patroneable. Scheduler: if bank field present, effective lookup key = `"\(bank)_\(s)"`. Unknown bank → friendly log warning, no crash. Both engines use the same key convention. |
+| `dec(x)` | ✅ nativo (Fase 5) | Alias for `decay(x)`. Strudel short form. Supports leading-dot literals: `.dec(.4)` = `.dec(0.4)`. |
+| `att(x)` | ✅ nativo (Fase 5) | Alias for `attack(x)`. |
+| `sus(x)` | ✅ nativo (Fase 5) | Alias for `sustain(x)`. |
+| `rel(x)` | ✅ nativo (Fase 5) | Alias for `release(x)`. |
+| ADSR on samples | ✅ nativo (Fase 5) | ADSR envelope applied to sample PCM buffers when any of attack/decay/sustain/release is explicitly set. Pre-processed per event (same pattern as crush). If no ADSR param is set → buffer unchanged (backward-compat). |
+| `$:` | ✅ nativo (Fase 5) | Top-level parallel patterns. Each line starting with `$:` defines one pattern; they are stacked implicitly. `_$:` (muted) lines are ignored. Multi-line patterns: body continues until next `$:` / `_$:` line. Limitation: continuation lines must not start with `$:` or `_$:`. |
+| Leading-dot numbers | ✅ nativo (Fase 5) | `.4` accepted everywhere as `0.4` (affects all numeric method args in CodeParser). |
 
 ## Nota sobre equivalencia estadística del RNG (sometimes/often/rarely)
 
@@ -258,3 +266,51 @@ Both are documented in COMPATIBILITY.md (this file) with the rationale above.
 | Per-event vowel (unique per event in same layer) | Per-chain compromise | All events in the same layer see the last-set vowel |
 | `chop`/`striate` on synths | Pattern-level only | begin/end fields are ignored in the synth scheduler path (synth sound is generated; no sample buffer to segment) |
 | Offline distortion/vowel audio test | Not tested offline | AVAudioUnit DSP requires a running engine. Parameter mappings (wetDryMix, band frequencies) are unit-tested |
+
+---
+
+## Fase 5: Drum Sample Bank
+
+### Available samples
+
+Both engines (Strudel WebView and MiniEngine) use the same files from `Samples/`.
+
+| Canonical name | File (flat) | File (tr909) | File (tr808) | Origin (repo) |
+|---|---|---|---|---|
+| `bd`  | `bd.wav`  | `tr909/bd.wav`  | `tr808/bd.wav`  | RolandTR909/rolandtr909-bd/Bassdrum-01.wav ; RolandTR808/rolandtr808-bd/BD0000.WAV |
+| `sd`  | `sd.wav`  | `tr909/sd.wav`  | `tr808/sd.wav`  | RolandTR909/rolandtr909-sd/sd01.wav ; RolandTR808/rolandtr808-sd/SD0000.WAV |
+| `hh`  | `hh.wav`  | `tr909/hh.wav`  | `tr808/hh.wav`  | RolandTR909/rolandtr909-hh/hh01.wav ; RolandTR808/rolandtr808-hh/CH.WAV |
+| `oh`  | `oh.wav`  | `tr909/oh.wav`  | `tr808/oh.wav`  | RolandTR909/rolandtr909-oh/oh01.wav ; RolandTR808/rolandtr808-oh/OH00.WAV |
+| `cp`  | `cp.wav`  | `tr909/cp.wav`  | `tr808/cp.wav`  | RolandTR909/rolandtr909-cp/cp01.wav ; RolandTR808/rolandtr808-cp/cp0.wav |
+| `rim` | `rim.wav` | `tr909/rim.wav` | `tr808/rim.wav` | RolandTR909/rolandtr909-rim/rs01.wav ; RolandTR808/rolandtr808-rim/RS.WAV |
+| `lt`  | `lt.wav`  | `tr909/lt.wav`  | `tr808/lt.wav`  | RolandTR909/rolandtr909-lt/lt01.wav ; RolandTR808/rolandtr808-lt/LT00.WAV |
+| `mt`  | `mt.wav`  | `tr909/mt.wav`  | `tr808/mt.wav`  | RolandTR909/rolandtr909-mt/mt01.wav ; RolandTR808/rolandtr808-mt/MT00.WAV |
+| `ht`  | `ht.wav`  | `tr909/ht.wav`  | `tr808/ht.wav`  | RolandTR909/rolandtr909-ht/ht01.wav ; RolandTR808/rolandtr808-ht/HT00.WAV |
+| `cr`  | `cr.wav`  | `tr909/cr.wav`  | `tr808/cr.wav`  | RolandTR909/rolandtr909-cr/cr01.wav ; RolandTR808/rolandtr808-cr/CY0000.WAV (cymbal) |
+| `rd`  | `rd.wav`  | `tr909/rd.wav`  | `tr808/rd.wav`  | RolandTR909/rolandtr909-rd/rd01.wav ; **TR808 has no native ride — tr808_rd maps to CY0000.WAV (cymbal substitute)** |
+| `pad` | `pad.wav` | — | — | Original project asset, preserved |
+| `bell`| `bell.wav`| — | — | Original project asset, preserved (note-mapped, c4 base) |
+
+Source: `github.com/ritchse/tidal-drum-machines` (CC licence — same set as strudel.cc).
+Clone: `git clone --depth 1 https://github.com/ritchse/tidal-drum-machines.git` (shallow, in /tmp — not bundled in repo).
+
+### bank() status: ✅
+
+`bank("tr909")` and `bank("tr808")` work in both engines.
+- **Strudel (WebView)**: samples registered with `tr909_*` / `tr808_*` keys in `samples({...}, base)`. Strudel's native `.bank()` method prepends the bank name automatically.
+- **MiniEngine**: `EngineAdapter` enumerates `Samples/` recursively; subfolder files get key `subfolder_filename` (e.g. `tr909/bd.wav` → `"tr909_bd"`). Scheduler resolves effective key as `"\(bank)_\(s)"` when `bank` field is present.
+
+### $: status: ✅
+
+`$:` top-level parallel pattern syntax is implemented in CodeParser (MiniEngine).
+Multi-line continuation is supported (a pattern body continues until the next `$:` or `_$:` line).
+`_$:` (muted) patterns are silently ignored.
+
+The Strudel WebView side already supports `$:` natively via its `evaluate()` function.
+
+### ADSR on samples note
+
+When `dec()` / `att()` / `sus()` / `rel()` (or their long forms) are set on a sample pattern,
+an ADSR amplitude envelope is applied to the PCM buffer before scheduling.
+If **none** of the ADSR parameters are set, the buffer is passed through unchanged — no change
+in sound for existing patterns that don't use ADSR. This is the backward-compatibility guarantee.

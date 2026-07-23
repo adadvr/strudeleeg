@@ -592,6 +592,93 @@ public func bitcrushedBuffer(_ buffer: AVAudioPCMBuffer, bits: Double) -> AVAudi
     return result
 }
 
+// MARK: - ADSR envelope over sample buffer
+
+/// Apply an ADSR amplitude envelope to a copy of a PCM buffer.
+///
+/// Semantics:
+///   - Attack  [0 .. attack*sr]:              gain ramps 0 → 1
+///   - Decay   [attack*sr .. (att+dec)*sr]:   gain ramps 1 → sustain
+///   - Sustain [(att+dec)*sr .. dur*sr]:       gain stays at sustain level
+///   - Release [dur*sr .. (dur+rel)*sr]:       gain ramps sustain → 0
+///
+/// The buffer is extended with silence for the release tail if it is shorter than
+/// the A+D+S window (the buffer may be shorter than durationSec; this is fine —
+/// the envelope is computed per-sample up to the buffer's actual frame count).
+///
+/// If all ADSR params produce a transparent envelope (att~0, dec~0, sus=1, rel~0),
+/// the result is perceptually identical to the source buffer.
+///
+/// Parameters:
+///   buffer:      source Float32 non-interleaved PCM buffer.
+///   sampleRate:  buffer sample rate.
+///   attack:      attack time in seconds (≥0).
+///   decay:       decay time in seconds (≥0).
+///   sustain:     sustain level 0..1.
+///   release:     release time in seconds (≥0).
+///   durationSec: note duration (sustain window end). Clamped to buffer length.
+/// Returns: new buffer with envelope applied, same format as input.
+public func adsrEnvelopeBuffer(
+    _ buffer: AVAudioPCMBuffer,
+    sampleRate: Double,
+    attack: Double,
+    decay: Double,
+    sustain: Double,
+    release: Double,
+    durationSec: Double
+) -> AVAudioPCMBuffer {
+    guard let srcChannels = buffer.floatChannelData else { return buffer }
+    let sr          = Float(sampleRate)
+    let frameCount  = Int(buffer.frameLength)
+    let channelCount = Int(buffer.format.channelCount)
+    guard frameCount > 0, channelCount > 0 else { return buffer }
+
+    let attFrames = Int(max(0, Float(attack)  * sr))
+    let decFrames = Int(max(0, Float(decay)   * sr))
+    let relFrames = Int(max(0, Float(release) * sr))
+    let durFrames = Int(max(0, Float(durationSec) * sr))
+
+    // Compute per-frame gain envelope
+    let totalFrames = frameCount  // output matches input length
+    var envelope = [Float](repeating: Float(sustain), count: totalFrames)
+
+    for i in 0..<totalFrames {
+        if i < attFrames {
+            // Attack: 0 → 1
+            envelope[i] = attFrames > 0 ? Float(i) / Float(attFrames) : 1.0
+        } else if i < attFrames + decFrames {
+            // Decay: 1 → sustain
+            let t = Float(i - attFrames) / Float(max(1, decFrames))
+            envelope[i] = 1.0 - t * (1.0 - Float(sustain))
+        } else if i < durFrames {
+            // Sustain
+            envelope[i] = Float(sustain)
+        } else {
+            // Release: sustain → 0
+            let relStart = max(attFrames + decFrames, durFrames)
+            let t = relFrames > 0 ? Float(i - relStart) / Float(relFrames) : 1.0
+            envelope[i] = Float(sustain) * max(0.0, 1.0 - t)
+        }
+    }
+
+    // Allocate result and apply envelope
+    guard let result = AVAudioPCMBuffer(
+        pcmFormat: buffer.format,
+        frameCapacity: buffer.frameCapacity
+    ) else { return buffer }
+    result.frameLength = buffer.frameLength
+
+    guard let dstChannels = result.floatChannelData else { return buffer }
+    for ch in 0..<channelCount {
+        let src = srcChannels[ch]
+        let dst = dstChannels[ch]
+        for i in 0..<totalFrames {
+            dst[i] = src[i] * envelope[i]
+        }
+    }
+    return result
+}
+
 // MARK: - Resonance → bandwidth mapping
 
 /// Map Strudel resonance (Q, 0..50) to AVAudioUnitEQ bandwidth (octaves, 0.05..5).

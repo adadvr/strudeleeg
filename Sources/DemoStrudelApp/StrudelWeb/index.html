@@ -92,10 +92,59 @@
 
         var samplesFn = window.strudelSamples;
         if (samplesFn) {
+          // ── Default (flat) drum kit — copies from tr909 ──────────────────────
+          // These are the "bankless" names used in plain s("bd") patterns.
+          // ── TR909 bank ────────────────────────────────────────────────────────
+          // .bank("tr909") prepends "tr909_" to the sample name → looks up tr909_bd etc.
+          // ── TR808 bank ────────────────────────────────────────────────────────
+          // .bank("tr808") → tr808_bd etc.
+          // Note: TR808 has no rd sample — tr808_rd maps to the cymbal (CY) as the
+          //       closest available substitute. See COMPATIBILITY.md for details.
           await samplesFn(
             {
+              // Pad / Bell (existing, preserved)
               pad:  ['pad.wav'],
-              bell: { c4: ['bell.wav'] }
+              bell: { c4: ['bell.wav'] },
+
+              // Default flat drum kit (from tr909 sources)
+              bd:  ['bd.wav'],
+              sd:  ['sd.wav'],
+              hh:  ['hh.wav'],
+              oh:  ['oh.wav'],
+              cp:  ['cp.wav'],
+              rim: ['rim.wav'],
+              lt:  ['lt.wav'],
+              mt:  ['mt.wav'],
+              ht:  ['ht.wav'],
+              cr:  ['cr.wav'],
+              rd:  ['rd.wav'],
+
+              // TR909 bank (used with .bank("tr909"))
+              tr909_bd:  ['tr909/bd.wav'],
+              tr909_sd:  ['tr909/sd.wav'],
+              tr909_hh:  ['tr909/hh.wav'],
+              tr909_oh:  ['tr909/oh.wav'],
+              tr909_cp:  ['tr909/cp.wav'],
+              tr909_rim: ['tr909/rim.wav'],
+              tr909_lt:  ['tr909/lt.wav'],
+              tr909_mt:  ['tr909/mt.wav'],
+              tr909_ht:  ['tr909/ht.wav'],
+              tr909_cr:  ['tr909/cr.wav'],
+              tr909_rd:  ['tr909/rd.wav'],
+
+              // TR808 bank (used with .bank("tr808"))
+              // rd not available on TR808 — mapped to cymbal (CR) as substitute
+              tr808_bd:  ['tr808/bd.wav'],
+              tr808_sd:  ['tr808/sd.wav'],
+              tr808_hh:  ['tr808/hh.wav'],
+              tr808_oh:  ['tr808/oh.wav'],
+              tr808_cp:  ['tr808/cp.wav'],
+              tr808_rim: ['tr808/rim.wav'],
+              tr808_lt:  ['tr808/lt.wav'],
+              tr808_mt:  ['tr808/mt.wav'],
+              tr808_ht:  ['tr808/ht.wav'],
+              tr808_cr:  ['tr808/cr.wav'],
+              tr808_rd:  ['tr808/rd.wav'],  // substitute: CY cymbal (no native rd in TR808)
             },
             base
           );

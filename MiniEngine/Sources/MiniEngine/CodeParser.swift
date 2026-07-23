@@ -4,13 +4,22 @@
 // Supports:
 //   setcps(x) / setcpm(x)  — top-level tempo statement (applied to scheduler)
 //   stack(expr, expr, ...)
+//   $: expr                 — top-level parallel patterns (Strudel $: syntax).
+//                             Lines starting with $: define one pattern each;
+//                             they are stacked into an implicit stack(). Muted
+//                             patterns (_$:) are silently ignored.
+//                             Multi-line: a pattern continues until the next
+//                             line beginning with $: or _$: (simple join with \n).
 //   s("mini") .note("mini") .slow(n) .fast(n) .gain(n|"mini") .room(n) .cutoff(n)
 //   .pan(n|"mini")  — stereo position 0..1
 //   .delay(n) .delaytime(n) .delayfeedback(n)  — echo effect
 //   .euclid(k,n) / .euclid(k,n,rot)  — Euclidean rhythm
 //   n("mini") + .scale("Root:name")  — scale-based melody
+//   .bank("name")  — sample bank prefix; effective key = "bank_sampleName"
+//   .dec(x) .att(x) .sus(x) .rel(x)  — ADSR short aliases
 //   // line comments (stripped before parsing)
 //
+// Number literals: .4 (leading dot) is accepted as 0.4 everywhere.
 // Unknown methods produce a friendly warning (not a hard error).
 // ---------------------------------------------------------------------------
 
@@ -54,6 +63,7 @@ public struct CodeParser {
         var cps: Double? = nil
         var patternLines: [String] = []
 
+        // First pass: handle setcps/setcpm and collect remaining lines
         for line in lines {
             let stripped = stripLineCommentsFromLine(line)
             let trimmed  = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -79,24 +89,86 @@ public struct CodeParser {
             patternLines.append(stripped)
         }
 
-        let code = patternLines.joined(separator: "\n")
+        // Detect $: top-level parallel pattern syntax.
+        // Lines starting with "$:" each define one pattern; "_$:" lines are muted (ignored).
+        // A pattern body may span multiple physical lines until the next $:/_$: line.
+        // We split the collected lines at each $:/_$: boundary and join continuation lines.
+        let hasDollarColon = patternLines.contains { line in
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.hasPrefix("$:") || t.hasPrefix("_$:")
+        }
+
+        let code: String
+        if hasDollarColon {
+            // Collect $: segments (ignore _$: muted ones)
+            var segments: [String] = []
+            var current: String? = nil
+
+            for line in patternLines {
+                let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if t.hasPrefix("_$:") {
+                    // Muted — flush current if any, skip this one
+                    if let seg = current?.trimmingCharacters(in: .whitespacesAndNewlines), !seg.isEmpty {
+                        segments.append(seg)
+                    }
+                    current = nil
+                } else if t.hasPrefix("$:") {
+                    // New active pattern — flush current if any
+                    if let seg = current?.trimmingCharacters(in: .whitespacesAndNewlines), !seg.isEmpty {
+                        segments.append(seg)
+                    }
+                    let body = String(t.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    current = body
+                } else {
+                    // Continuation line — append to current segment
+                    if current != nil {
+                        current! += "\n" + line
+                    } else {
+                        // Line before any $: — treat as non-$: code (fallback)
+                        current = line
+                    }
+                }
+            }
+            // Flush last segment
+            if let seg = current?.trimmingCharacters(in: .whitespacesAndNewlines), !seg.isEmpty {
+                segments.append(seg)
+            }
+
+            if segments.isEmpty {
+                return ParseResult(pattern: .silence, cps: cps)
+            }
+            if segments.count == 1 {
+                // Single active pattern — parse normally
+                let pat = try parseLayerOrStack(segments[0])
+                return ParseResult(pattern: pat, cps: cps)
+            }
+            // Multiple segments → implicit stack
+            let layers = try segments.map { try parseLayerOrStack($0) }
+            return ParseResult(pattern: stackCP(layers), cps: cps)
+        }
+
+        // Normal (non-$:) path
+        code = patternLines.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !code.isEmpty else {
             return ParseResult(pattern: .silence, cps: cps)
         }
 
-        let pattern: ControlPattern
-        if code.hasPrefix("stack(") {
-            let inner = try extractArgs(code, function: "stack")
+        let pattern = try parseLayerOrStack(code)
+        return ParseResult(pattern: pattern, cps: cps)
+    }
+
+    /// Parse a code string that may be a stack(...) call or a single layer expression.
+    private func parseLayerOrStack(_ code: String) throws -> ControlPattern {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("stack(") {
+            let inner = try extractArgs(trimmed, function: "stack")
             let parts = splitTopLevelCommas(inner)
             let layers = try parts.map { try parseLayerExpr($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            pattern = stackCP(layers)
-        } else {
-            pattern = try parseLayerExpr(code)
+            return stackCP(layers)
         }
-
-        return ParseResult(pattern: pattern, cps: cps)
+        return try parseLayerExpr(trimmed)
     }
 
     // MARK: - Comment stripping
@@ -148,7 +220,10 @@ public struct CodeParser {
         "shape", "distort", "crush", "vowel",
         "chop", "striate",
         // Fase 4: chorus/phaser (not implemented — forwarded with warning)
-        "chorus", "phaser"
+        "chorus", "phaser",
+        // Fase 5: bank + ADSR aliases
+        "bank",
+        "dec", "att", "sus", "rel"
     ]
 
     private let friendlyUnknown: Set<String> = [
@@ -200,13 +275,13 @@ public struct CodeParser {
             // ── Timing ───────────────────────────────────────────────────────
             case "slow":
                 if let arg = token.arg,
-                   let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                   let factor = parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
                     pattern = pattern.slow(factor)
                 }
 
             case "fast":
                 if let arg = token.arg,
-                   let factor = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                   let factor = parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
                     pattern = pattern.fast(factor)
                 }
 
@@ -214,50 +289,50 @@ public struct CodeParser {
             case "gain":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.gain(v) }
-                    else                 { pattern = pattern.gain(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.gain(v) }
+                    else                      { pattern = pattern.gain(unquote(t)) }
                 }
 
             case "room":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.room(v) }
-                    else                 { pattern = pattern.room(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.room(v) }
+                    else                      { pattern = pattern.room(unquote(t)) }
                 }
 
             case "cutoff":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.cutoff(v) }
-                    else                 { pattern = pattern.cutoff(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.cutoff(v) }
+                    else                      { pattern = pattern.cutoff(unquote(t)) }
                 }
 
             case "pan":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.pan(v) }
-                    else                 { pattern = pattern.pan(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.pan(v) }
+                    else                      { pattern = pattern.pan(unquote(t)) }
                 }
 
             case "delay":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.delay(v) }
-                    else                 { pattern = pattern.delay(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.delay(v) }
+                    else                      { pattern = pattern.delay(unquote(t)) }
                 }
 
             case "delaytime":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.delaytime(v) }
-                    else                 { pattern = pattern.delaytime(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.delaytime(v) }
+                    else                      { pattern = pattern.delaytime(unquote(t)) }
                 }
 
             case "delayfeedback":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.delayfeedback(v) }
-                    else                 { pattern = pattern.delayfeedback(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.delayfeedback(v) }
+                    else                      { pattern = pattern.delayfeedback(unquote(t)) }
                 }
 
             case "euclid":
@@ -274,59 +349,59 @@ public struct CodeParser {
             case "attack":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.attack(v) }
-                    else                 { pattern = pattern.attack(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.attack(v) }
+                    else                      { pattern = pattern.attack(unquote(t)) }
                 }
 
             case "decay":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.decay(v) }
-                    else                 { pattern = pattern.decay(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.decay(v) }
+                    else                      { pattern = pattern.decay(unquote(t)) }
                 }
 
             case "sustain":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.sustain(v) }
-                    else                 { pattern = pattern.sustain(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.sustain(v) }
+                    else                      { pattern = pattern.sustain(unquote(t)) }
                 }
 
             case "release":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.release(v) }
-                    else                 { pattern = pattern.release(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.release(v) }
+                    else                      { pattern = pattern.release(unquote(t)) }
                 }
 
             // ── Fase 3: Filters ───────────────────────────────────────────────
             case "lpf":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.lpf(v) }
-                    else                 { pattern = pattern.lpf(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.lpf(v) }
+                    else                      { pattern = pattern.lpf(unquote(t)) }
                 }
 
             case "hpf":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.hpf(v) }
-                    else                 { pattern = pattern.hpf(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.hpf(v) }
+                    else                      { pattern = pattern.hpf(unquote(t)) }
                 }
 
             case "resonance":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.resonance(v) }
-                    else                 { pattern = pattern.resonance(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.resonance(v) }
+                    else                      { pattern = pattern.resonance(unquote(t)) }
                 }
 
             // ── Fase 3: speed ─────────────────────────────────────────────────
             case "speed":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.speed(v) }
-                    else                 { pattern = pattern.speed(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.speed(v) }
+                    else                      { pattern = pattern.speed(unquote(t)) }
                 }
 
             case "scale":
@@ -387,7 +462,7 @@ public struct CodeParser {
                 if let arg = token.arg {
                     let parts = splitTopLevelCommas(arg)
                     if parts.count == 2,
-                       let t = Double(parts[0].trimmingCharacters(in: .whitespaces)),
+                       let t = parseDouble(parts[0].trimmingCharacters(in: .whitespaces)),
                        let f = parseLambda(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) {
                         pattern = pattern.off(t, f)
                     } else {
@@ -414,15 +489,15 @@ public struct CodeParser {
             case "shape":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.shape(v) }
-                    else                 { pattern = pattern.shape(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.shape(v) }
+                    else                      { pattern = pattern.shape(unquote(t)) }
                 }
 
             case "distort":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.distort(v) }
-                    else                 { pattern = pattern.distort(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.distort(v) }
+                    else                      { pattern = pattern.distort(unquote(t)) }
                 }
 
             // ── Fase 4: Bitcrusher ────────────────────────────────────────────
@@ -430,8 +505,8 @@ public struct CodeParser {
             case "crush":
                 if let arg = token.arg {
                     let t = arg.trimmingCharacters(in: .whitespaces)
-                    if let v = Double(t) { pattern = pattern.crush(v) }
-                    else                 { pattern = pattern.crush(unquote(t)) }
+                    if let v = parseDouble(t) { pattern = pattern.crush(v) }
+                    else                      { pattern = pattern.crush(unquote(t)) }
                 }
 
             // ── Fase 4: Vowel formant filter ──────────────────────────────────
@@ -464,6 +539,44 @@ public struct CodeParser {
 
             case "phaser":
                 print("[CodeParser] 'phaser' is not implemented in Fase 4 — skipping. See COMPATIBILITY.md")
+
+            // ── Fase 5: bank selection ─────────────────────────────────────────
+
+            case "bank":
+                if let arg = token.arg {
+                    let t = unquote(arg.trimmingCharacters(in: .whitespaces))
+                    pattern = pattern.bank(t)
+                }
+
+            // ── Fase 5: ADSR short aliases ────────────────────────────────────
+
+            case "dec":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.dec(v) }
+                    else                      { pattern = pattern.dec(unquote(t)) }
+                }
+
+            case "att":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.att(v) }
+                    else                      { pattern = pattern.att(unquote(t)) }
+                }
+
+            case "sus":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.sus(v) }
+                    else                      { pattern = pattern.sus(unquote(t)) }
+                }
+
+            case "rel":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.rel(v) }
+                    else                      { pattern = pattern.rel(unquote(t)) }
+                }
 
             default:
                 break
@@ -519,41 +632,41 @@ public struct CodeParser {
             for token in methodTokens {
                 switch token.name {
                 case "slow":
-                    if let arg = token.arg, let v = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                    if let arg = token.arg, let v = self.parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
                         result = result.slow(v)
                     }
                 case "fast":
-                    if let arg = token.arg, let v = Double(arg.trimmingCharacters(in: .whitespaces)) {
+                    if let arg = token.arg, let v = self.parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
                         result = result.fast(v)
                     }
                 case "gain":
                     if let arg = token.arg {
                         let t = arg.trimmingCharacters(in: .whitespaces)
-                        if let v = Double(t) { result = result.gain(v) }
-                        else                 { result = result.gain(unquote(t)) }
+                        if let v = self.parseDouble(t) { result = result.gain(v) }
+                        else                           { result = result.gain(self.unquote(t)) }
                     }
                 case "room":
                     if let arg = token.arg {
                         let t = arg.trimmingCharacters(in: .whitespaces)
-                        if let v = Double(t) { result = result.room(v) }
-                        else                 { result = result.room(unquote(t)) }
+                        if let v = self.parseDouble(t) { result = result.room(v) }
+                        else                           { result = result.room(self.unquote(t)) }
                     }
                 case "cutoff":
                     if let arg = token.arg {
                         let t = arg.trimmingCharacters(in: .whitespaces)
-                        if let v = Double(t) { result = result.cutoff(v) }
-                        else                 { result = result.cutoff(unquote(t)) }
+                        if let v = self.parseDouble(t) { result = result.cutoff(v) }
+                        else                           { result = result.cutoff(self.unquote(t)) }
                     }
                 case "pan":
                     if let arg = token.arg {
                         let t = arg.trimmingCharacters(in: .whitespaces)
-                        if let v = Double(t) { result = result.pan(v) }
-                        else                 { result = result.pan(unquote(t)) }
+                        if let v = self.parseDouble(t) { result = result.pan(v) }
+                        else                           { result = result.pan(self.unquote(t)) }
                     }
                 case "delay":
                     if let arg = token.arg {
                         let t = arg.trimmingCharacters(in: .whitespaces)
-                        if let v = Double(t) { result = result.delay(v) }
+                        if let v = self.parseDouble(t) { result = result.delay(v) }
                     }
                 case "rev":
                     result = result.rev
@@ -695,5 +808,18 @@ public struct CodeParser {
         if r.hasPrefix("\"") { r = String(r.dropFirst()) }
         if r.hasSuffix("\"") { r = String(r.dropLast()) }
         return r
+    }
+
+    /// Parse a double literal, supporting Strudel's shorthand leading-dot notation.
+    /// ".4" → 0.4, ".25" → 0.25. Standard "0.4" and "-0.4" also work.
+    private func parseDouble(_ s: String) -> Double? {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix(".") || t.hasPrefix("-.") {
+            // Prepend "0" to make it valid for Double()
+            let prefix = t.hasPrefix("-") ? "-0" : "0"
+            let rest   = t.hasPrefix("-") ? String(t.dropFirst()) : t
+            return Double(prefix + rest)
+        }
+        return Double(t)
     }
 }

@@ -33,6 +33,14 @@ Plan derivado de [newchanges.md](../newchanges.md). La demo A/B ([devstrudeleeg.
 - [x] chorus/phaser: FUERA a propósito (sin LFO nativo no hay versión honesta; documentado en COMPATIBILITY.md)
 - [x] Commit Fase 4
 
+## Fixes (fixes.md) ✅
+- [x] Banco de percusión compartido: bd/sd/hh/oh/cp/rim/lt/mt/ht/cr/rd (tidal-drum-machines, CC) en Samples/ + bancos tr909/ y tr808/
+- [x] Registrados en ambos motores (mismos archivos, verificado por hash y sonda)
+- [x] `bank("tr909")` en Mini Engine (Strudel lo trae nativo)
+- [x] Alias `dec`/`att`/`sus`/`rel` + ADSR sobre samples (por evento) + números `.4`
+- [x] `$:` patrones paralelos (con `_$:` muted)
+- [x] Criterio de aceptación: patrones de fixes.md parsean y cargan en ambos lados (243 tests; WebProbe sin fallos)
+
 ## Transversal ✅
 - [x] COMPATIBILITY.md al día (Fases 0–4)
 - [x] Clean-room respetado; oracle solo como caja negra (45 fixtures, 128 haps)

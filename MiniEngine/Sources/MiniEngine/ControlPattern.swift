@@ -275,6 +275,39 @@ extension Pattern where T == [String: ControlValue] {
         return withControl(parseMini(str).map { ["vowel": .string($0.lowercased())] })
     }
 
+    // MARK: - ADSR short aliases (Strudel public API)
+
+    /// dec(x) — alias for decay(x). Strudel short alias.
+    public func dec(_ value: Double) -> ControlPattern { decay(value) }
+    public func dec(_ pattern: String) -> ControlPattern { decay(pattern) }
+
+    /// att(x) — alias for attack(x). Strudel short alias.
+    public func att(_ value: Double) -> ControlPattern { attack(value) }
+    public func att(_ pattern: String) -> ControlPattern { attack(pattern) }
+
+    /// sus(x) — alias for sustain(x). Strudel short alias.
+    public func sus(_ value: Double) -> ControlPattern { sustain(value) }
+    public func sus(_ pattern: String) -> ControlPattern { sustain(pattern) }
+
+    /// rel(x) — alias for release(x). Strudel short alias.
+    public func rel(_ value: Double) -> ControlPattern { release(value) }
+    public func rel(_ pattern: String) -> ControlPattern { release(pattern) }
+
+    // MARK: - Bank selection
+
+    /// bank("name") — sets a sample bank prefix.
+    /// In the scheduler, the effective sample key becomes "\(bank)_\(s)".
+    /// Semantics match Strudel: s("bd").bank("tr909") → looks up "tr909_bd".
+    /// Patroneable: bank("<tr909 tr808>") alternates per cycle.
+    public func bank(_ name: String) -> ControlPattern {
+        // Single bare bank name (no spaces or brackets → pure value)
+        if !name.contains(" ") && !name.contains("<") && !name.contains("[") {
+            return withControl(.pure(["bank": .string(name)]))
+        }
+        // Mini-notation pattern
+        return withControl(parseMini(name).map { ["bank": .string($0)] })
+    }
+
     // MARK: - Fase 4: Granular — chop / striate
 
     /// chop(n) — cut each sample event into n sequential sub-events.
