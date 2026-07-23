@@ -52,6 +52,16 @@ final class NativeEngineAdapter: AudioDemoEngine {
     }
 }
 
+/// Construye el mapa [key: URL] de samples locales del bundle (Samples/).
+/// Reutilizado por NativeEngineAdapter y por el backend JUCE.
+func bundleSampleURLs() -> [String: URL] {
+    let bundle = AppBundle.resources
+    guard let samplesDir = bundle.url(forResource: "Samples", withExtension: nil) else {
+        return [:]
+    }
+    return EngineAdapter_buildSampleURLs(from: samplesDir)
+}
+
 // MARK: - Recursive sample URL builder
 
 /// Enumerates `samplesDir` recursively and builds a [key: URL] dictionary.

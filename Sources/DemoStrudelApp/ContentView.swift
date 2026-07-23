@@ -18,16 +18,18 @@ struct ContentView: View {
     // Engine state
     @StateObject private var vm = DemoViewModel()
 
-    // Editor text (two independent bindings, same initial content)
+    // Editor text (three independent bindings, same initial content)
     @State private var leftCode  = seedCode
     @State private var rightCode = seedCode
+    @State private var juceCode  = seedCode
 
     var body: some View {
         VStack(spacing: 0) {
-            // ── Two panels ──────────────────────────────────────────────
+            // ── Three panels: Strudel · Mini Engine · JUCE ──────────────
             HSplitView {
                 leftPanel
                 rightPanel
+                jucePanel
             }
             .frame(minHeight: 480)
 
@@ -54,7 +56,7 @@ struct ContentView: View {
             .padding(.vertical, 16)
             .background(Color(nsColor: .windowBackgroundColor))
         }
-        .frame(minWidth: 1000, minHeight: 600)
+        .frame(minWidth: 1400, minHeight: 600)
     }
 
     // ── Left panel — Motor A (Strudel / WebView) ─────────────────────────
@@ -119,6 +121,37 @@ struct ContentView: View {
                     .foregroundColor(.red)
                     .lineLimit(3)
             } else if !vm.statusMessage.isEmpty && vm.lastPlayedSide == .right {
+                Text(vm.statusMessage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 420)
+    }
+
+    // ── Third panel — Motor C (JUCE / juce::dsp) ─────────────────────────
+    private var jucePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            panelHeader(
+                title: "JUCE Engine",
+                subtitle: "C++ · juce::dsp (synths + samples · FX en progreso)",
+                systemImage: "cpu",
+                color: .orange,
+                isPlaying: vm.lastPlayedSide == .juce
+            )
+
+            codeEditor(text: $juceCode)
+
+            Button {
+                vm.playJuce(code: juceCode)
+            } label: {
+                playButtonLabel(isActive: vm.lastPlayedSide == .juce)
+            }
+            .buttonStyle(PlayButtonStyle(color: .orange, isActive: vm.lastPlayedSide == .juce))
+
+            if !vm.statusMessage.isEmpty && vm.lastPlayedSide == .juce {
                 Text(vm.statusMessage)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -214,7 +247,7 @@ struct PlayButtonStyle: ButtonStyle {
 // ---------------------------------------------------------------------------
 // DemoViewModel — holds engine references and state
 // ---------------------------------------------------------------------------
-enum PlaySide { case left, right, none }
+enum PlaySide { case left, right, juce, none }
 
 @MainActor
 final class DemoViewModel: ObservableObject {
@@ -226,12 +259,23 @@ final class DemoViewModel: ObservableObject {
 
     private let nativeEngine: NativeEngineAdapter
     private let strudelEngine: StrudelWebEngine
+    private let juceEngine: JuceEngine
+    private let juceScheduler: JucePatternScheduler
 
     init() {
         self.nativeEngine = NativeEngineAdapter()
         self.strudelEngine = StrudelWebEngine()
+        let je = JuceEngine()
+        self.juceEngine = je
+        self.juceScheduler = JucePatternScheduler(engine: je, sampleURLs: bundleSampleURLs())
 
         self.nativeEngine.onParseError = { [weak self] msg in
+            Task { @MainActor in
+                self?.parseError = msg
+            }
+        }
+
+        self.juceScheduler.onParseError = { [weak self] msg in
             Task { @MainActor in
                 self?.parseError = msg
             }
@@ -257,6 +301,7 @@ final class DemoViewModel: ObservableObject {
     func playStrudel(code: String) {
         strudelEngine.stop()          // stop current if any
         nativeEngine.stop()           // stop the other engine for clean A/B
+        juceScheduler.stop()
         lastPlayedSide = .left
         strudelError = ""
         statusMessage = "Iniciando Strudel…"
@@ -266,15 +311,29 @@ final class DemoViewModel: ObservableObject {
     func playNative(code: String) {
         nativeEngine.stop()           // stop previous if playing
         strudelEngine.stop()          // stop the other engine for clean A/B
+        juceEngine.stop()
         lastPlayedSide = .right
         parseError = ""
         statusMessage = "Reproduciendo Motor B…"
         nativeEngine.play(code: code)
     }
 
+    /// Fase 2: JUCE reproduce voces de synth reales del patrón (samples/FX en
+    /// Fases 3-4). Reutiliza el motor de patrones Swift vía JucePatternScheduler.
+    func playJuce(code: String) {
+        nativeEngine.stop()
+        strudelEngine.stop()
+        juceScheduler.stop()
+        lastPlayedSide = .juce
+        parseError = ""
+        statusMessage = "Reproduciendo JUCE (synths + samples · FX en progreso)"
+        juceScheduler.play(code: code)
+    }
+
     func stopAll() {
         nativeEngine.stop()
         strudelEngine.stop()
+        juceScheduler.stop()
         statusMessage = ""
         strudelError = ""
         parseError = ""

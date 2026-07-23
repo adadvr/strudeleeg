@@ -99,6 +99,26 @@
             "target": "VolumeCalibrate",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release VolumeCalibrate"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Debug JuceProbe",
+            "target": "JuceProbe",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug JuceProbe"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Release JuceProbe",
+            "target": "JuceProbe",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release JuceProbe"
         }
     ]
 }

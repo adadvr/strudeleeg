@@ -408,157 +408,99 @@ public final class PatternScheduler {
         let querySpan  = TimeSpan(cycleBegin, cycleEnd)
         let haps       = pattern.query(querySpan)
 
-        for hap in haps {
-            guard let sBase = hap.value["s"]?.stringValue else { continue }
+        // Fase 1: extracción de parámetros compartida (misma lógica para el backend
+        // JUCE). PatternScheduler mantiene su despacho AVAudio; solo delega el
+        // parsing de campos del hap al extractor neutral.
+        let events = PatternEventExtractor.events(
+            haps:          haps,
+            cycleSeconds:  cycleSeconds,
+            startHostTime: startHostTime,
+            windowStart:   windowStart,
+            windowEnd:     windowEnd,
+            defaultOrbit:  PatternScheduler.defaultOrbit
+        )
 
-            // Resolve bank: if "bank" field present, effective key = "bank_sampleName"
-            let bankName = hap.value["bank"]?.stringValue ?? ""
-            let sName = bankName.isEmpty ? sBase : "\(bankName)_\(sBase)"
+        for ev in events {
+            dispatch(ev)
+        }
+    }
 
-            // Bug 1 fix: read _layer index (0 if not set) for per-branch chain isolation.
-            let layerIdx = Int(hap.value["_layer"]?.doubleValue ?? 0.0)
+    /// Traduce un ScheduledEvent neutral a la cadena AVAudio (orbit FX + duck +
+    /// dispatchSynthHap/dispatchHap). Extraído de scheduleWindow en Fase 1 para
+    /// que el backend JUCE reutilice el mismo evento sin duplicar la extracción.
+    private func dispatch(_ ev: ScheduledEvent) {
+        // P0-4: update orbit bus room/delay with this event's values (last wins per orbit).
+        let orbitBus = buildOrbitBus(orbitIdx: ev.orbit)
+        if let r = ev.room { orbitBus.applyRoom(r) }
+        if let s = ev.size { orbitBus.applySize(s) }    // P1-8: size → reverb preset
+        if let d = ev.delay {
+            orbitBus.applyDelay(wet: d, time: ev.delaytime, feedback: ev.delayfeedback)
+        }
+        // P1-5: duck sidechain — attenuate target orbit bus gain at this event onset.
+        if let dOrbit = ev.duckOrbit {
+            let targetBus = buildOrbitBus(orbitIdx: Int(dOrbit))
+            scheduleDuck(on: targetBus, depth: ev.duckDepth, attackSec: ev.duckAttack,
+                         atHostSeconds: ev.absoluteTime)
+        }
 
-            // :n variation index (0 = default). Set by s("name:N") or .n("...") chain.
-            // Strudel: n selects sample variation when no scale is active.
-            let nIdx = Int(hap.value["n"]?.doubleValue ?? 0)
-
-            // Event absolute time: onset of the hap's part in cycle units → seconds
-            let hapCycleOnset = hap.part.begin
-            let hapSeconds    = hapCycleOnset.toDouble * cycleSeconds
-            let absoluteTime  = startHostTime + hapSeconds
-
-            guard absoluteTime >= windowStart, absoluteTime < windowEnd else { continue }
-            guard absoluteTime >= startHostTime else { continue }
-
-            let midiNote      = hap.value["note"]?.doubleValue
-            let gainValue     = hap.value["gain"]?.doubleValue ?? 1.0
-            let roomValue     = hap.value["room"]?.doubleValue
-            let cutoffValue   = hap.value["cutoff"]?.doubleValue ?? hap.value["lpf"]?.doubleValue
-            let hpfValue      = hap.value["hpf"]?.doubleValue
-            let resonanceVal  = hap.value["resonance"]?.doubleValue
-            let panValue      = hap.value["pan"]?.doubleValue
-            let delayValue    = hap.value["delay"]?.doubleValue
-            let delayTimeVal  = hap.value["delaytime"]?.doubleValue
-            let delayFeedVal  = hap.value["delayfeedback"]?.doubleValue
-            let speedValue    = hap.value["speed"]?.doubleValue
-            // P0-4: orbit index (default = PatternScheduler.defaultOrbit = 1)
-            let orbitVal      = Int(hap.value["orbit"]?.doubleValue ?? Double(PatternScheduler.defaultOrbit))
-            let attackVal     = hap.value["attack"]?.doubleValue
-            let decayVal      = hap.value["decay"]?.doubleValue
-            let sustainVal    = hap.value["sustain"]?.doubleValue
-            let releaseVal    = hap.value["release"]?.doubleValue
-            // Fase 4 parameters
-            let shapeVal      = hap.value["shape"]?.doubleValue
-            let distortVal    = hap.value["distort"]?.doubleValue
-            let crushVal      = hap.value["crush"]?.doubleValue
-            let vowelVal      = hap.value["vowel"]?.stringValue
-            let beginVal      = hap.value["begin"]?.doubleValue   // chop/striate sample begin (0..1)
-            let endVal        = hap.value["end"]?.doubleValue     // chop/striate sample end (0..1)
-            // P1-5: duck sidechain
-            let duckOrbit     = hap.value["duck"]?.doubleValue         // target orbit index
-            let duckAttackVal = hap.value["duckattack"]?.doubleValue ?? 0.1  // recovery seconds
-            let duckDepthVal  = hap.value["duckdepth"]?.doubleValue  ?? 1.0  // 0..1 depth
-            // P1-6: filter envelope modulation
-            let lpenvVal      = hap.value["lpenv"]?.doubleValue ?? 0.0   // octaves
-            let hpenvVal      = hap.value["hpenv"]?.doubleValue ?? 0.0
-            // P1-8: postgain, size
-            let postgainVal   = hap.value["postgain"]?.doubleValue ?? 1.0
-            let sizeVal       = hap.value["size"]?.doubleValue
-
-            // Event duration in cycle units (for ADSR note duration)
-            let hapDurationCycles = (hap.whole ?? hap.part).end.toDouble
-                                  - (hap.whole ?? hap.part).begin.toDouble
-            let hapDurationSec = hapDurationCycles * cycleSeconds
-
-            if isSynthName(sName) {
-                // ── Synth route ─────────────────────────────────────────────
-                // P0-4: update orbit bus room/delay with this event's values (last wins per orbit).
-                let orbitBus = buildOrbitBus(orbitIdx: orbitVal)
-                if let r = roomValue { orbitBus.applyRoom(r) }
-                if let s = sizeVal   { orbitBus.applySize(s) }    // P1-8: size → reverb preset
-                if let d = delayValue {
-                    orbitBus.applyDelay(wet: d, time: delayTimeVal, feedback: delayFeedVal)
-                }
-                // P1-5: duck sidechain — attenuate target orbit bus gain at this event onset.
-                if let dOrbit = duckOrbit {
-                    let targetBus = buildOrbitBus(orbitIdx: Int(dOrbit))
-                    scheduleDuck(on: targetBus, depth: duckDepthVal, attackSec: duckAttackVal,
-                                 atHostSeconds: absoluteTime)
-                }
-                dispatchSynthHap(
-                    synthName:    sName,
-                    layerIdx:     layerIdx,
-                    midiNote:     midiNote ?? Double(synthDefaultMIDI),
-                    gain:         gainValue,
-                    lpf:          cutoffValue,
-                    hpf:          hpfValue,
-                    resonance:    resonanceVal,
-                    pan:          panValue,
-                    attack:       attackVal   ?? ADSRDefaults.attack,
-                    decay:        decayVal    ?? ADSRDefaults.decay,
-                    sustain:      sustainVal  ?? ADSRDefaults.sustain,
-                    release:      releaseVal  ?? ADSRDefaults.release,
-                    durationSec:  hapDurationSec,
-                    absoluteTime: absoluteTime,
-                    shape:        shapeVal,
-                    distort:      distortVal,
-                    crush:        crushVal,
-                    vowel:        vowelVal,
-                    lpenv:        lpenvVal,
-                    hpenv:        hpenvVal,
-                    postgain:     postgainVal
-                )
-            } else {
-                // ── Sample route ────────────────────────────────────────────
-                // P0-4: update orbit bus room/delay with this event's values (last wins per orbit).
-                let orbitBus = buildOrbitBus(orbitIdx: orbitVal)
-                if let r = roomValue { orbitBus.applyRoom(r) }
-                if let s = sizeVal   { orbitBus.applySize(s) }    // P1-8: size → reverb preset
-                if let d = delayValue {
-                    orbitBus.applyDelay(wet: d, time: delayTimeVal, feedback: delayFeedVal)
-                }
-                // P1-5: duck sidechain — attenuate target orbit bus gain at this event onset.
-                if let dOrbit = duckOrbit {
-                    let targetBus = buildOrbitBus(orbitIdx: Int(dOrbit))
-                    scheduleDuck(on: targetBus, depth: duckDepthVal, attackSec: duckAttackVal,
-                                 atHostSeconds: absoluteTime)
-                }
-                // Detect explicit ADSR parameters (nil = use default/no-op)
-                // If NONE of attack/decay/sustain/release are set by the user,
-                // we skip envelope processing entirely (backward-compat: no change in sound).
-                let hasExplicitADSR = attackVal != nil || decayVal != nil
-                                   || sustainVal != nil || releaseVal != nil
-                dispatchHap(
-                    sampleName:    sName,
-                    layerIdx:      layerIdx,
-                    variationIdx:  nIdx,
-                    midiNote:      midiNote.map { Int($0) },
-                    gain:          gainValue,
-                    room:          roomValue,
-                    cutoff:        cutoffValue,
-                    hpf:           hpfValue,           // P0-3: per-event HPF
-                    resonance:     resonanceVal,        // P0-3: per-event resonance Q
-                    pan:           panValue,
-                    delay:         delayValue,
-                    delaytime:     delayTimeVal,
-                    delayfeedback: delayFeedVal,
-                    speed:         speedValue,
-                    absoluteTime:  absoluteTime,
-                    shape:         shapeVal,
-                    distort:       distortVal,
-                    crush:         crushVal,
-                    vowel:         vowelVal,
-                    beginFrac:     beginVal,
-                    endFrac:       endVal,
-                    postgain:      postgainVal,
-                    // ADSR for samples (only when explicitly set)
-                    attack:        hasExplicitADSR ? (attackVal  ?? ADSRDefaults.attack)  : nil,
-                    decay:         hasExplicitADSR ? (decayVal   ?? ADSRDefaults.decay)   : nil,
-                    sustain:       hasExplicitADSR ? (sustainVal ?? ADSRDefaults.sustain) : nil,
-                    release:       hasExplicitADSR ? (releaseVal ?? ADSRDefaults.release) : nil,
-                    durationSec:   hasExplicitADSR ? hapDurationSec : nil
-                )
-            }
+        if ev.isSynth {
+            dispatchSynthHap(
+                synthName:    ev.sName,
+                layerIdx:     ev.layerIdx,
+                midiNote:     ev.midiNote ?? Double(synthDefaultMIDI),
+                gain:         ev.gain,
+                lpf:          ev.cutoff,
+                hpf:          ev.hpf,
+                resonance:    ev.resonance,
+                pan:          ev.pan,
+                attack:       ev.attack   ?? ADSRDefaults.attack,
+                decay:        ev.decay    ?? ADSRDefaults.decay,
+                sustain:      ev.sustain  ?? ADSRDefaults.sustain,
+                release:      ev.release  ?? ADSRDefaults.release,
+                durationSec:  ev.durationSec,
+                absoluteTime: ev.absoluteTime,
+                shape:        ev.shape,
+                distort:      ev.distort,
+                crush:        ev.crush,
+                vowel:        ev.vowel,
+                lpenv:        ev.lpenv,
+                hpenv:        ev.hpenv,
+                postgain:     ev.postgain
+            )
+        } else {
+            // If NONE of attack/decay/sustain/release are set, skip envelope
+            // processing entirely (backward-compat: no change in sound).
+            let hasADSR = ev.hasExplicitADSR
+            dispatchHap(
+                sampleName:    ev.sName,
+                layerIdx:      ev.layerIdx,
+                variationIdx:  ev.variationIdx,
+                midiNote:      ev.midiNote.map { Int($0) },
+                gain:          ev.gain,
+                room:          ev.room,
+                cutoff:        ev.cutoff,
+                hpf:           ev.hpf,             // P0-3: per-event HPF
+                resonance:     ev.resonance,        // P0-3: per-event resonance Q
+                pan:           ev.pan,
+                delay:         ev.delay,
+                delaytime:     ev.delaytime,
+                delayfeedback: ev.delayfeedback,
+                speed:         ev.speed,
+                absoluteTime:  ev.absoluteTime,
+                shape:         ev.shape,
+                distort:       ev.distort,
+                crush:         ev.crush,
+                vowel:         ev.vowel,
+                beginFrac:     ev.begin,
+                endFrac:       ev.end,
+                postgain:      ev.postgain,
+                // ADSR for samples (only when explicitly set)
+                attack:        hasADSR ? (ev.attack  ?? ADSRDefaults.attack)  : nil,
+                decay:         hasADSR ? (ev.decay   ?? ADSRDefaults.decay)   : nil,
+                sustain:       hasADSR ? (ev.sustain ?? ADSRDefaults.sustain) : nil,
+                release:       hasADSR ? (ev.release ?? ADSRDefaults.release) : nil,
+                durationSec:   hasADSR ? ev.durationSec : nil
+            )
         }
     }
 
