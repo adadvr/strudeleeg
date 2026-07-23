@@ -666,7 +666,9 @@ public final class PatternScheduler {
             audioEngine.attach(panner)
 
             // Chain: player → varispeed → eq → reverb → delay → distortion → vowelEQ → panner → mainMixer
-            audioEngine.connect(player,     to: varispeed,  format: nil)
+            // Formato explícito en el player: todos los buffers están normalizados
+            // a canonicalFormat, y la conexión debe coincidir o scheduleBuffer lanza.
+            audioEngine.connect(player,     to: varispeed,  format: Self.canonicalFormat)
             audioEngine.connect(varispeed,  to: eq,         format: nil)
             audioEngine.connect(eq,         to: reverb,     format: nil)
             audioEngine.connect(reverb,     to: delay,      format: nil)
@@ -719,6 +721,12 @@ public final class PatternScheduler {
 
     // MARK: - Buffer loading
 
+    /// Formato canónico de todos los buffers de sample. El banco mezcla formatos
+    /// (tr909/bd estéreo 16-bit, tr909/hh mono 24-bit, tr808 mono...) y un
+    /// AVAudioPlayerNode lanza NSException si el formato del buffer no coincide
+    /// con el de su conexión — así que TODO se normaliza al cargar.
+    static let canonicalFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)!
+
     private func preloadBuffers(for names: Set<String>) throws {
         for name in names {
             if buffers[name] != nil { continue }
@@ -732,8 +740,39 @@ public final class PatternScheduler {
                 frameCapacity: AVAudioFrameCount(file.length)
             ) else { continue }
             try file.read(into: buf)
-            buffers[name] = buf
+            buffers[name] = Self.normalizedBuffer(buf)
         }
+    }
+
+    /// Convierte cualquier buffer al formato canónico (float32 deinterleaved,
+    /// estéreo, 44.1kHz). Mono se duplica a ambos canales (mapeo por defecto
+    /// de AVAudioConverter). Devuelve el original si ya es canónico.
+    static func normalizedBuffer(_ buf: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
+        let fmt = canonicalFormat
+        let f = buf.format
+        if f.channelCount == fmt.channelCount,
+           f.sampleRate == fmt.sampleRate,
+           f.commonFormat == .pcmFormatFloat32,
+           !f.isInterleaved {
+            return buf
+        }
+        guard let converter = AVAudioConverter(from: f, to: fmt) else { return buf }
+        let ratio = fmt.sampleRate / f.sampleRate
+        let capacity = AVAudioFrameCount(Double(buf.frameLength) * ratio) + 1024
+        guard let out = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: capacity) else { return buf }
+        var fed = false
+        var err: NSError?
+        let status = converter.convert(to: out, error: &err) { _, outStatus in
+            if fed { outStatus.pointee = .endOfStream; return nil }
+            fed = true
+            outStatus.pointee = .haveData
+            return buf
+        }
+        if status == .error {
+            print("[PatternScheduler] normalizedBuffer conversion failed: \(err?.localizedDescription ?? "?")")
+            return buf
+        }
+        return out
     }
 
     // MARK: - Time utilities

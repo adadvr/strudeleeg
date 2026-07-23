@@ -377,3 +377,64 @@ final class Tier5Tests: XCTestCase {
         XCTAssertEqual(key2, "bd")
     }
 }
+
+// MARK: - Regresión: formatos mezclados del banco de percusión (crash scheduleBuffer)
+
+extension Tier5Tests {
+
+    /// Los WAV del banco vienen en formatos mezclados (estéreo 16-bit, mono 24-bit).
+    /// Todo buffer debe normalizarse al formato canónico o AVAudioPlayerNode lanza
+    /// NSException al agendar.
+    func testNormalizedBufferConvertsMonoToCanonical() throws {
+        let mono = AVAudioFormat(standardFormatWithSampleRate: 22050, channels: 1)!
+        let buf = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: 2205)!
+        buf.frameLength = 2205
+        for i in 0..<2205 { buf.floatChannelData![0][i] = sin(Float(i) * 0.05) }
+
+        let out = PatternScheduler.normalizedBuffer(buf)
+        XCTAssertEqual(out.format.channelCount, 2)
+        XCTAssertEqual(out.format.sampleRate, 44100)
+        XCTAssertEqual(out.format.commonFormat, .pcmFormatFloat32)
+        // 0.1s a 22050 → ~0.1s a 44100 (± margen del converter)
+        XCTAssertGreaterThan(out.frameLength, 4000)
+        // Mono duplicado: ambos canales con señal
+        var energyL: Float = 0, energyR: Float = 0
+        for i in 0..<Int(out.frameLength) {
+            energyL += abs(out.floatChannelData![0][i])
+            energyR += abs(out.floatChannelData![1][i])
+        }
+        XCTAssertGreaterThan(energyL, 1)
+        XCTAssertGreaterThan(energyR, 1)
+    }
+
+    func testNormalizedBufferPassthroughWhenCanonical() {
+        let fmt = PatternScheduler.canonicalFormat
+        let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 100)!
+        buf.frameLength = 100
+        XCTAssertTrue(PatternScheduler.normalizedBuffer(buf) === buf)
+    }
+
+    /// Smoke test del crash reportado: s("[bd <hh oh>]*2").bank("tr909").dec(.4)
+    /// con los WAV reales del repo (bd estéreo, hh/oh mono). Agenda ~1.2s de audio
+    /// por un engine real; antes del fix esto moría con NSException en scheduleBuffer.
+    func testMixedFormatBankPatternDoesNotCrash() throws {
+        let samplesDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // MiniEngineTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // MiniEngine
+            .deletingLastPathComponent()  // repo root
+            .appendingPathComponent("Sources/DemoStrudelApp/Samples")
+        var urls: [String: URL] = [:]
+        for name in ["bd", "hh", "oh"] {
+            urls["tr909_\(name)"] = samplesDir.appendingPathComponent("tr909/\(name).wav")
+        }
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: urls["tr909_bd"]!.path),
+                          "Samples no disponibles en este entorno")
+
+        let engine = MiniEngine(sampleURLs: urls)
+        engine.play(code: #"s("[bd <hh oh>]*2").bank("tr909").dec(.4)"#)
+        // Dejar correr el scheduler más de un lookahead para que agende bd y hh/oh
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.2))
+        engine.stop()
+    }
+}
