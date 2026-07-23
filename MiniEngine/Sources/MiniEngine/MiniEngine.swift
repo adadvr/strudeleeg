@@ -21,6 +21,9 @@ public final class MiniEngine {
 
     private let sampleURLs: [String: URL]
     private let audioEngine = AVAudioEngine()
+
+    /// Acceso al engine para tests de diagnóstico (tap en mainMixer).
+    public var audioEngineForTesting: AVAudioEngine { audioEngine }
     private var scheduler: PatternScheduler?
 
     /// Called on the main thread if code parsing fails.

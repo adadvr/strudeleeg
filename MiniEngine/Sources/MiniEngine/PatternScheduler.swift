@@ -588,7 +588,9 @@ public final class PatternScheduler {
         }
         guard let layer = synthLayers[chainKey] else { return }
 
-        let sampleRate = audioEngine.outputNode.outputFormat(forBus: 0).sampleRate
+        // Usar el rate de la CAPA (el que declara su sourceNode y usan sus voces),
+        // no el del outputNode: si difieren, el pitch sale transpuesto (bug e5→606Hz).
+        let sampleRate = layer.sampleRate
         let freq = synthFrequency(midi: midiNote)
 
         // Apply per-chain effects

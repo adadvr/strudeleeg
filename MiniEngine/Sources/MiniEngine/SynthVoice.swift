@@ -397,6 +397,9 @@ final class SynthVoice {
 final class SynthLayer {
 
     let synthName:  String
+    /// Sample rate con el que renderizan las voces Y que declara el sourceNode.
+    /// Deben ser el mismo — ver nota en init sobre el bug de pitch.
+    let sampleRate: Double
     let sourceNode: AVAudioSourceNode
     let eq:         AVAudioUnitEQ
     let reverb:     AVAudioUnitReverb
@@ -479,8 +482,17 @@ final class SynthLayer {
         let capturedVoices  = self.voices
         let capturedLock    = self.renderLock
         let capturedSR      = sampleRate   // captured once; fixed for lifetime of node
+        self.sampleRate     = sampleRate
 
-        self.sourceNode = AVAudioSourceNode(renderBlock: { isSilence, timestamp, frameCount, audioBufferList -> OSStatus in
+        // CRÍTICO: el nodo DEBE declarar su formato con este mismo sample rate.
+        // Sin formato explícito, el engine renderiza el bloque al rate del
+        // hardware (p.ej. 48000) mientras las voces calculan dt con `sampleRate`
+        // (44100) → todos los synths sonaban ~1.4 semitonos graves (bug real
+        // medido: e5 salía a 606 Hz en vez de 659). Con el formato declarado,
+        // el mixer del engine convierte al rate del dispositivo sin tocar el pitch.
+        let nodeFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
+
+        self.sourceNode = AVAudioSourceNode(format: nodeFormat, renderBlock: { isSilence, timestamp, frameCount, audioBufferList -> OSStatus in
             let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
             let frameCountInt = Int(frameCount)
 
