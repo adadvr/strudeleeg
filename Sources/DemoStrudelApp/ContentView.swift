@@ -1,4 +1,5 @@
 import SwiftUI
+import MiniEngine
 
 // ---------------------------------------------------------------------------
 // Seed code — identical in both editors (from devstrudeleeg.md brief)
@@ -315,6 +316,13 @@ final class DemoViewModel: ObservableObject {
         lastPlayedSide = .right
         parseError = ""
         statusMessage = "Reproduciendo Motor B…"
+
+        // Validar antes de reproducir — nunca impide la reproducción
+        let diags = CodeParser().validate(code)
+        if !diags.isEmpty {
+            parseError = formatDiagnostics(diags)
+        }
+
         nativeEngine.play(code: code)
     }
 
@@ -327,7 +335,33 @@ final class DemoViewModel: ObservableObject {
         lastPlayedSide = .juce
         parseError = ""
         statusMessage = "Reproduciendo JUCE (synths + samples · FX en progreso)"
+
+        // Validar antes de reproducir — nunca impide la reproducción
+        let diags = CodeParser().validate(code)
+        if !diags.isEmpty {
+            parseError = formatDiagnostics(diags)
+        }
+
         juceScheduler.play(code: code)
+    }
+
+    /// Formatea una lista de diagnósticos en texto legible multi-línea (en español).
+    private func formatDiagnostics(_ diags: [PatternDiagnostic]) -> String {
+        diags.map { diag in
+            let prefix: String
+            switch diag.kind {
+            case .arbitraryJS:
+                prefix = "⚠ Línea \(diag.line): JavaScript no soportado"
+            case .unsupported:
+                prefix = "⚠ Línea \(diag.line): `\(diag.token)` no soportado"
+            case .info:
+                prefix = "ℹ Línea \(diag.line): \(diag.token)"
+            }
+            if let sug = diag.suggestion {
+                return "\(prefix) — \(sug)"
+            }
+            return prefix
+        }.joined(separator: "\n")
     }
 
     func stopAll() {

@@ -871,3 +871,20 @@ Si `samples()` no aparece en el código, o si la red falla y no hay manifest en 
 - El motor usa exclusivamente las URLs locales pasadas en `init(sampleURLs:)`.
 - Los samples `pad` y `bell` bundleados siguen disponibles.
 - No hay crash ni silencio inesperado.
+
+---
+
+## Validador de patrones (v1.3 · P0)
+
+`CodeParser().validate(_ code:) -> [PatternDiagnostic]` — corre **antes** de reproducir, nunca lanza ni crashea. Cada `PatternDiagnostic` trae:
+- `kind`: `.unsupported` (función fuera del subset), `.arbitraryJS` (código JS que el motor no interpreta), `.info`.
+- `token`: la función/sintaxis ofensora (ej. `pickOut`).
+- `message`: texto legible en español.
+- `suggestion`: alternativa sugerida, si existe.
+- `line`: línea del código (1-based).
+
+Detección:
+- **Funciones no soportadas**: nombres invocados que no están en `knownMethods` ni en las bases reconocidas (`s`, `note`, `n`, `stack`, `samples`, `setcps`, `setcpm`, señales). Sugerencias mapeadas para las funciones del roadmap v1.3 (`pickOut`, `clip`, `late`, `transpose`, `chord`, `layer`, …).
+- **JavaScript arbitrario**: líneas que empiezan con `const`/`let`/`var`/`function`, contienen `=>` o `register(`. El motor es un parser de mini-notación + scheduler, **no** un intérprete JS (ver "techo de la arquitectura" en functionalityv1.3.md).
+
+La UI (paneles Mini Engine / JUCE) muestra los diagnósticos como aviso legible sin impedir la reproducción — el motor toca lo que sí soporta.

@@ -390,7 +390,8 @@ public struct CodeParser {
 
     // MARK: - Layer expression parser
 
-    private let knownMethods: Set<String> = [
+    // internal (no private) para que PatternValidator.swift lo consulte sin duplicar.
+    let knownMethods: Set<String> = [
         "s", "sound", "note", "n", "scale",
         "slow", "fast",
         "gain", "room", "cutoff",
@@ -438,7 +439,8 @@ public struct CodeParser {
         "slice", "loopAt"
     ]
 
-    private let friendlyUnknown: Set<String> = [
+    // internal (no private) para que PatternValidator.swift lo consulte sin duplicar.
+    let friendlyUnknown: Set<String> = [
         "chorus", "phaser"   // Fase 4: not implemented, warn but don't error
     ]
 
