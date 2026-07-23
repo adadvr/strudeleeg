@@ -714,6 +714,123 @@ const CASES = [
       return slowcat(sil, sil, ...Array(14).fill(bassGrp));
     },
   },
+
+  // ── Chords (comma inside [...] and at top level) ────────────────────────────
+  // Verified against the oracle black box: mini("[a3,c4,e4]"), mini("c3,e3"),
+  // mini("[bd bd, hh hh hh]"), mini("<[a3,c4,e4] [e3,g#3,b3]>"),
+  // mini("[a3,c4,e4]!2"), mini("<[a3,c4,e4] [a3,c4,e4] [e3,g#3,b3] [a3,c4,e4]>")
+
+  {
+    // note("[a3,c4,e4]") → 3 simultaneous note events spanning the full cycle
+    // Semantics: [a,b,c] with commas = stack(a, b, c), each note whole-cycle
+    // Oracle: mini("[a3,c4,e4]") → 3 haps at part [0/1, 1/1) with values "a3","c4","e4"
+    // note() converts each to MIDI: a3=57, c4=60, e4=64
+    label: 'note("[a3,c4,e4]")',
+    spanCycles: 1,
+    build() {
+      return stack(
+        pure({ note: 57 }),   // a3 = MIDI 57
+        pure({ note: 60 }),   // c4 = MIDI 60
+        pure({ note: 64 }),   // e4 = MIDI 64
+      );
+    },
+  },
+
+  {
+    // note("c3,e3") — top-level chord: stack of 2 simultaneous notes
+    // Oracle: mini("c3,e3") → 2 haps at part [0/1, 1/1) with values "c3","e3"
+    // c3=48, e3=52
+    label: 'note("c3,e3")',
+    spanCycles: 1,
+    build() {
+      return stack(
+        pure({ note: 48 }),   // c3 = MIDI 48
+        pure({ note: 52 }),   // e3 = MIDI 52
+      );
+    },
+  },
+
+  {
+    // note("[a3,c4,e4]!2") — chord replicated 2 equal steps
+    // Oracle: mini("[a3,c4,e4]!2") → 6 haps:
+    //   3 at part [0/1, 1/2) (a3,c4,e4), 3 at part [1/2, 1/1) (a3,c4,e4)
+    label: 'note("[a3,c4,e4]!2")',
+    spanCycles: 1,
+    build() {
+      const chord = stack(pure({ note: 57 }), pure({ note: 60 }), pure({ note: 64 }));
+      return fastcat(chord, chord);
+    },
+  },
+
+  {
+    // note("<[a3,c4,e4] [e3,g#3,b3]>") — alternating chord per cycle
+    // Oracle: mini("<[a3,c4,e4] [e3,g#3,b3]>") → cycle 0: a3,c4,e4; cycle 1: e3,g#3,b3
+    // MIDI: a3=57, c4=60, e4=64, e3=52, g#3=56, b3=59
+    label: 'note("<[a3,c4,e4] [e3,g#3,b3]>")',
+    spanCycles: 2,
+    build() {
+      const chordA = stack(pure({ note: 57 }), pure({ note: 60 }), pure({ note: 64 }));
+      const chordB = stack(pure({ note: 52 }), pure({ note: 56 }), pure({ note: 59 }));
+      return slowcat(chordA, chordB);
+    },
+  },
+
+  {
+    // note("<[a3,c4,e4] [a3,c4,e4] [e3,g#3,b3] [a3,c4,e4]>") — PAD layer (4-cycle slowcat)
+    // Oracle: mini("<[a3,c4,e4] [a3,c4,e4] [e3,g#3,b3] [a3,c4,e4]>"):
+    //   cycle 0: a3,c4,e4; cycle 1: a3,c4,e4; cycle 2: e3,g#3,b3; cycle 3: a3,c4,e4
+    label: 'note("<[a3,c4,e4] [a3,c4,e4] [e3,g#3,b3] [a3,c4,e4]>")',
+    spanCycles: 4,
+    build() {
+      const chordA = stack(pure({ note: 57 }), pure({ note: 60 }), pure({ note: 64 }));
+      const chordB = stack(pure({ note: 52 }), pure({ note: 56 }), pure({ note: 59 }));
+      return slowcat(chordA, chordA, chordB, chordA);
+    },
+  },
+
+  {
+    // s("[bd bd, hh hh hh]") — two parallel sub-sequences of different step counts
+    // Oracle: mini("[bd bd, hh hh hh]") → 5 haps:
+    //   bd at [0/1,1/2), bd at [1/2,1/1), hh at [0/1,1/3), hh at [1/3,2/3), hh at [2/3,1/1)
+    label: 's("[bd bd, hh hh hh]")',
+    spanCycles: 1,
+    build() {
+      const bdSeq = fastcat(pure({ s: 'bd' }), pure({ s: 'bd' }));
+      const hhSeq = fastcat(pure({ s: 'hh' }), pure({ s: 'hh' }), pure({ s: 'hh' }));
+      return stack(bdSeq, hhSeq);
+    },
+  },
+
+  {
+    // note("d#5") — sharp with high octave; must parse and convert to MIDI correctly
+    // d#5 = MIDI 75 (D=2, #=+1, octave 5: (5+1)*12 + 2 + 1 = 75)
+    label: 'note("d#5")',
+    spanCycles: 1,
+    build() {
+      return pure({ note: 75 });
+    },
+  },
+
+  {
+    // note("g#3") — sharp in lower octave
+    // g#3 = MIDI 56 (G=7, #=+1, octave 3: (3+1)*12 + 7 + 1 = 56)
+    label: 'note("g#3")',
+    spanCycles: 1,
+    build() {
+      return pure({ note: 56 });
+    },
+  },
+
+  {
+    // note("a3!1 b3") — !1 replicates once (= no-op, single copy), b3 is next step
+    // mini("a3!1 b3") → 2 haps: a3 at [0/1,1/2), b3 at [1/2,1/1)
+    // a3=57, b3=59
+    label: 'note("a3!1 b3")',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({ note: 57 }), pure({ note: 59 }));
+    },
+  },
 ];
 
 // ── Query and serialize ──────────────────────────────────────────────────────

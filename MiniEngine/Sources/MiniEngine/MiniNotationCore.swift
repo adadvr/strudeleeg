@@ -36,6 +36,7 @@ public enum MiniNotationCore {
         case silence                // ~
         case group([Atom])          // [a b c]
         case slowcat([[Atom]])      // <a b c>
+        case chord([[Atom]])        // [a,b,c] or "a,b" — parallel stack (simultaneous)
         // Modifier wrappers (set after parsing base atom)
         case fast(Atom, Int)        // a*n  — play n times faster (subdivide)
         case replicate(Atom, Int)   // a!n  — repeat as n equal steps
@@ -47,7 +48,35 @@ public enum MiniNotationCore {
     static func tokenize(_ input: String) throws -> [Atom] {
         var scalars = Array(input.unicodeScalars)
         var idx = scalars.startIndex
-        return try parseSequence(&scalars, idx: &idx, terminators: [])
+        // Parse the top-level with comma awareness: if we find a comma at the
+        // outermost level the entire string is a chord (parallel stack).
+        return try parseParallelBranches(&scalars, idx: &idx, terminators: [])
+    }
+
+    /// Parse a sequence that may contain comma-separated branches (chord / parallel stack).
+    /// Each branch is itself a sequence; if there is only one branch, returns it directly.
+    /// If there are multiple branches, returns [.chord([[Atom]])].
+    private static func parseParallelBranches(
+        _ scalars: inout [Unicode.Scalar],
+        idx: inout Array<Unicode.Scalar>.Index,
+        terminators: Set<Unicode.Scalar>
+    ) throws -> [Atom] {
+        var branches: [[Atom]] = []
+        let commaTerminators = terminators.union([","])
+        let firstBranch = try parseSequence(&scalars, idx: &idx, terminators: commaTerminators)
+        // If we stopped at something other than comma, only one branch
+        if idx >= scalars.endIndex || scalars[idx] != "," || terminators.contains(",") {
+            return firstBranch
+        }
+        branches.append(firstBranch)
+        // Collect additional branches separated by commas
+        while idx < scalars.endIndex && scalars[idx] == "," {
+            idx = scalars.index(after: idx)   // consume ','
+            let branch = try parseSequence(&scalars, idx: &idx, terminators: commaTerminators)
+            branches.append(branch)
+        }
+        // Wrap in a single chord atom
+        return [.chord(branches)]
     }
 
     private static func parseSequence(
@@ -74,11 +103,14 @@ public enum MiniNotationCore {
 
             case "[":
                 idx = scalars.index(after: idx)
-                let sub = try parseSequence(&scalars, idx: &idx, terminators: ["]"])
+                // Parse inside [...] with chord support: commas create parallel branches.
+                // We use a local helper that passes "]" as terminator so comma-branches
+                // also stop at the closing bracket.
+                let sub = try parseGroupContent(&scalars, idx: &idx)
                 if idx < scalars.endIndex && scalars[idx] == "]" {
                     idx = scalars.index(after: idx)
                 }
-                var atom: Atom = .group(sub)
+                var atom: Atom = sub
                 atom = try parseModifiers(&scalars, idx: &idx, base: atom)
                 atoms.append(atom)
 
@@ -197,11 +229,12 @@ public enum MiniNotationCore {
             atom = .silence
         case "[":
             idx = scalars.index(after: idx)
-            let sub = try parseSequence(&scalars, idx: &idx, terminators: ["]"])
+            // Use parseGroupContent to support chords inside [...] within <...>
+            let inner = try parseGroupContent(&scalars, idx: &idx)
             if idx < scalars.endIndex && scalars[idx] == "]" {
                 idx = scalars.index(after: idx)
             }
-            atom = .group(sub)
+            atom = inner
         default:
             var word = ""
             while idx < scalars.endIndex, isWordChar(scalars[idx]) {
@@ -212,6 +245,28 @@ public enum MiniNotationCore {
         }
         atom = try parseModifiers(&scalars, idx: &idx, base: atom)
         return atom
+    }
+
+    /// Parse the content inside [...], returning a .group or .chord atom.
+    /// Commas create parallel branches (chord/stack); each branch is a sequence.
+    private static func parseGroupContent(
+        _ scalars: inout [Unicode.Scalar],
+        idx: inout Array<Unicode.Scalar>.Index
+    ) throws -> Atom {
+        // Parse first branch (stops at ',' or ']')
+        let firstBranch = try parseSequence(&scalars, idx: &idx, terminators: ["]", ","])
+        // If stopped at ']' (or end), single branch → regular group
+        if idx >= scalars.endIndex || scalars[idx] != "," {
+            return .group(firstBranch)
+        }
+        // Comma found: collect all branches
+        var branches: [[Atom]] = [firstBranch]
+        while idx < scalars.endIndex && scalars[idx] == "," {
+            idx = scalars.index(after: idx)   // consume ','
+            let branch = try parseSequence(&scalars, idx: &idx, terminators: ["]", ","])
+            branches.append(branch)
+        }
+        return .chord(branches)
     }
 
     private static func isWordChar(_ c: Unicode.Scalar) -> Bool {
@@ -323,6 +378,11 @@ public enum MiniNotationCore {
             return .silence
         case .group(let inner):
             return atomsToPattern(inner)
+        case .chord(let branches):
+            // Each branch is a parallel sub-sequence; stack them all simultaneously.
+            // The individual branches may have different step counts (like [bd bd, hh hh hh]).
+            let pats = branches.map { atomsToPattern($0) }
+            return stack(pats)
         case .slowcat(let alts):
             let patAlts = alts.map { atomsToPattern($0) }
             return slowcat(patAlts)
