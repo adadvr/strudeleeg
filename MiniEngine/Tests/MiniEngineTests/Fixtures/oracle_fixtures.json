@@ -1296,6 +1296,373 @@
     ]
   },
   {
+    "pattern": "s(\"pad\").shape(0.5)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad",
+          "shape": 0.5
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad\").distort(0.8)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad",
+          "distort": 0.8
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad\").crush(4)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad",
+          "crush": 4
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad bell\").crush(8)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "pad",
+          "crush": 8
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell",
+          "crush": 8
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"sawtooth\").vowel(\"a\")",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "sawtooth",
+          "vowel": "a"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"sawtooth\").vowel(\"<a o>\")",
+    "span": [
+      0,
+      2
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "sawtooth",
+          "vowel": "a"
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/1",
+          "end": "2/1"
+        },
+        "part": {
+          "begin": "1/1",
+          "end": "2/1"
+        },
+        "value": {
+          "s": "sawtooth",
+          "vowel": "o"
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad\").chop(4)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0,
+          "end": 0.25
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0.25,
+          "end": 0.5
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0.5,
+          "end": 0.75
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0.75,
+          "end": 1
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad bell\").chop(2)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/4"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0,
+          "end": 0.5
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "1/4",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0.5,
+          "end": 1
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "3/4"
+        },
+        "value": {
+          "s": "bell",
+          "begin": 0,
+          "end": 0.5
+        }
+      },
+      {
+        "whole": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "3/4",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell",
+          "begin": 0.5,
+          "end": 1
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad\").striate(4)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0,
+          "end": 0.25
+        }
+      }
+    ]
+  },
+  {
+    "pattern": "s(\"pad bell\").striate(2)",
+    "span": [
+      0,
+      1
+    ],
+    "haps": [
+      {
+        "whole": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "part": {
+          "begin": "0/1",
+          "end": "1/2"
+        },
+        "value": {
+          "s": "pad",
+          "begin": 0,
+          "end": 0.5
+        }
+      },
+      {
+        "whole": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "part": {
+          "begin": "1/2",
+          "end": "1/1"
+        },
+        "value": {
+          "s": "bell",
+          "begin": 0.5,
+          "end": 1
+        }
+      }
+    ]
+  },
+  {
     "pattern": "s(\"pad bell\").rev",
     "span": [
       0,

@@ -47,10 +47,14 @@ Living document: function → status → equivalence notes.
 | `hpf(hz)` | ✅ nativo (Fase 3) | High-pass filter frequency (Hz). AVAudioUnitEQ band[1] highPass. Patroneable |
 | `resonance(q)` | ✅ nativo (Fase 3) | Filter Q (0..50 per Strudel docs). Mapped to AVAudioUnitEQ bandwidth in octaves: `bandwidth = clamp(2.0/max(0.01,Q), 0.05, 5.0)`. Applies to both lpf and hpf bands. See resonance mapping note below |
 | `speed(x)` | ✅ nativo (Fase 3) | Sample playback speed (1=normal, 2=double speed +1 octave, 0.5=half). Multiplied with note-based varispeed rate. Negative speed: not supported (documented). For synths: speed() applies to pattern level only (frequency computed from MIDI directly). Patroneable |
-| `shape` / `distort` | ❌ no | Saturation (Fase 4) |
-| `chop` / `striate` | ❌ no | Granular (Fase 4) |
-| `crush` | ❌ no | Bitcrusher (Fase 4) |
-| `vowel` | ❌ no | Formant filter (Fase 4) |
+| `shape(x)` | ✅ nativo (Fase 4) | Soft saturation 0..1. AVAudioUnitDistortion, preset `.multiDistortedFunk` (warm overdrive). x → wetDryMix (x×100). Per-chain compromise. Patroneable |
+| `distort(x)` | ✅ nativo (Fase 4) | Same DSP path as shape (same preset). Strudel uses different curves; here both use the same preset but are separate controllable parameters. Documented approximation |
+| `crush(n)` | ✅ nativo (Fase 4) | Bitcrusher. n = effective bit depth (1..16). Formula: `round(s × 2^(n-1)) / 2^(n-1)` (public domain). Samples: buffer pre-processed per event. Synths: applied in render block per voice. Patroneable |
+| `vowel("a"\|"e"\|"i"\|"o"\|"u")` | ✅ nativo (Fase 4) | Formant filter. AVAudioUnitEQ with 3 parametric bands (F1/F2/F3). Frequencies from Peterson & Barney (1952) acoustic tables. Patroneable: `vowel("<a o>")` alternates per cycle |
+| `chop(n)` | ✅ nativo (Fase 4) | Cuts each event into n sequential sub-events. Each sub-event: time = 1/n of original, begin/end = k/n..(k+1)/n (sample fraction). Oracle verified. Scheduler plays each segment via sub-buffer |
+| `striate(n)` | ✅ nativo (Fase 4) | Assigns chunk (i mod n) to event i. Does NOT create new events (different from chop). Event i → begin=i%n/n, end=(i%n+1)/n. Oracle verified: `s("pad").striate(4)` → 1 event (chunk 0); `s("pad bell").striate(2)` → 2 events with interleaved chunks |
+| `chorus` | ❌ no (Fase 4) | Not implemented. See note below |
+| `phaser` | ❌ no (Fase 4) | Not implemented. See note below |
 
 ## Nota sobre equivalencia estadística del RNG (sometimes/often/rarely)
 
@@ -154,3 +158,103 @@ All oscillators are band-limited using polyBLEP corrections (standard public-dom
 | `speed()` affecting synth frequency | Not applicable | Synth frequency is computed from MIDI note; speed() is pattern-level only for synths |
 | Per-event room/cutoff/lpf/hpf/resonance | Per-chain compromise | Same as Fase 1. Node-global parameters updated at dispatch time — events alternating filter values in the same layer share the last-set value |
 | Offline filter audio test | Not tested | AVAudioUnitEQ requires a running engine. Parameter mapping is unit-tested. Actual DSP filter roll-off trusted to Apple |
+
+---
+
+## Fase 4: DSP / Textures
+
+### Audio chain (Fase 4 — updated)
+
+```
+Sample: AVAudioPlayerNode → AVAudioUnitVarispeed → AVAudioUnitEQ (lowpass)
+  → AVAudioUnitReverb (room) → AVAudioUnitDelay (delay)
+  → AVAudioUnitDistortion (shape/distort, dry default)
+  → AVAudioUnitEQ/3bands (vowel formant, bypassed default)
+  → AVAudioMixerNode (pan) → mainMixer
+
+Synth: AVAudioSourceNode (voice pool)
+  → AVAudioUnitEQ (lpf+hpf)
+  → AVAudioUnitReverb → AVAudioUnitDelay
+  → AVAudioUnitDistortion (shape/distort)
+  → AVAudioUnitEQ/3bands (vowel)
+  → AVAudioMixerNode (pan) → mainMixer
+```
+
+### shape / distort (saturation)
+
+- Preset: `AVAudioUnitDistortionPreset.multiDistortedFunk` (raw value 9).
+  Selected as the warmest/softest analog-style overdrive available in the native API.
+- Mapping: `x → wetDryMix = x × 100` (0 = dry, 100 = fully saturated).
+- `shape` and `distort` both use the same preset. If both are set in the same hap,
+  `distort` takes precedence. Strudel uses distinct distortion curves for shape/distort
+  (e.g. soft-clip vs hard-clip variants) — this approximation uses a single preset for both.
+  Documented compromise.
+- Per-chain: last-set value wins per layer (same limitation as lpf/room).
+
+### crush (bitcrusher)
+
+- Formula (public domain): `quantize(s, n) = round(s × 2^(n-1)) / 2^(n-1)`
+- Range: n = 1..16. Values below 1 clamped to 1; above 16 clamped to 16.
+- Samples: applied as AVAudioPCMBuffer pre-processing per event (quantised copy scheduled).
+- Synths: applied per sample inside the SynthVoice render block, post-ADSR.
+- At n=16: ~transparent (32768 levels, step ≈ 3×10⁻⁵). At n=4: 8 levels (heavy lo-fi).
+- Patroneable.
+
+### vowel (formant filter)
+
+Formant frequencies (Hz) — Peterson & Barney (1952), approximate midpoint average:
+
+| Vowel | Phoneme | F1 | F2 | F3 |
+|---|---|---|---|---|
+| `a` | /ɑ/ "father" | 730 | 1090 | 2440 |
+| `e` | /ɛ/ "bed"    | 530 | 1840 | 2480 |
+| `i` | /iː/ "see"  | 390 | 1990 | 2550 |
+| `o` | /ɔ/ "thought" | 570 | 840 | 2410 |
+| `u` | /uː/ "food" | 440 | 1020 | 2240 |
+
+- Implementation: AVAudioUnitEQ with 3 parametric (bell) bands, gain=+6dB, bandwidth=0.5 octaves.
+- Bypassed by default; activated on each event that has a vowel field.
+- Per-chain: all events in the same layer share the last-set vowel.
+- Patroneable: `vowel("<a o>")` alternates per cycle (verified).
+
+### chop / striate (granular)
+
+Semantics verified against oracle (Strudel black-box):
+
+**chop(n)**: cuts EACH event into n sequential sub-events:
+- Each sub-event has: time = 1/n of original slot; begin = k/n; end = (k+1)/n
+- Event count multiplied by n: `s("pad bell").chop(2)` → 4 events
+- Scheduler plays sub-buffer: `AVAudioPCMBuffer[frameStart:frameEnd]` (O(frameCount) copy per event)
+
+**striate(n)**: assigns chunk (i mod n) to event i — does NOT create new events:
+- Event i in sorted order gets: begin = (i mod n)/n; end = ((i mod n)+1)/n
+- For `s("pad").striate(4)`: 1 event, chunk 0 → begin=0, end=0.25
+- For `s("pad bell").striate(2)`: 2 events — pad→chunk0, bell→chunk1
+- Key difference from chop: striate interleaves existing events; chop multiplies them
+
+### chorus / phaser — NOT IMPLEMENTED
+
+**chorus**: The task brief notes that AVAudioUnitDelay-based approximation (~20ms, low feedback,
+no modulation) would not qualify as "honest". True chorus requires modulated delay (not natively
+available as a configurable AVAudioUnit). A custom implementation would require an AVAudioSourceNode
+tap or AU, which is disproportionate for a motor demo.
+**Decision**: omitted. CodeParser accepts `chorus()` without error (logs warning, no-op).
+
+**phaser**: Requires a chain of all-pass biquad sections with LFO modulation. Implementable
+in principle inside a custom render block, but the result would sound wrong at all parameter
+values without calibrated feedback and notch spacing. Not worth including as a broken
+approximation in a production-quality motor.
+**Decision**: omitted. CodeParser accepts `phaser()` without error (logs warning, no-op).
+
+Both are documented in COMPATIBILITY.md (this file) with the rationale above.
+
+## What is NOT supported (Fase 4)
+
+| Feature | Status | Notes |
+|---|---|---|
+| `chorus` | Not implemented | See chorus/phaser note above |
+| `phaser` | Not implemented | See chorus/phaser note above |
+| Per-event shape/distort (unique per event in same layer) | Per-chain compromise | Last-set value wins. Same limitation as lpf/room |
+| Per-event vowel (unique per event in same layer) | Per-chain compromise | All events in the same layer see the last-set vowel |
+| `chop`/`striate` on synths | Pattern-level only | begin/end fields are ignored in the synth scheduler path (synth sound is generated; no sample buffer to segment) |
+| Offline distortion/vowel audio test | Not tested offline | AVAudioUnit DSP requires a running engine. Parameter mappings (wetDryMix, band frequencies) are unit-tested |

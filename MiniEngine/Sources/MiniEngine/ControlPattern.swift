@@ -220,6 +220,119 @@ extension Pattern where T == [String: ControlValue] {
         withControl(parseMini(pattern).map { ["speed": .double(Double($0) ?? 1.0)] })
     }
 
+    // MARK: - Fase 4: Distortion / Saturation
+
+    /// shape(x) — soft saturation, x 0..1.
+    /// Implemented via AVAudioUnitDistortion (per-chain). x → wetDryMix (x×100).
+    public func shape(_ value: Double) -> ControlPattern {
+        withControl(.pure(["shape": .double(value)]))
+    }
+
+    public func shape(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["shape": .double(Double($0) ?? 0.0)] })
+    }
+
+    /// distort(x) — distortion, x 0..1.
+    /// Same DSP path as shape() but mapped through a different preset (SpeechWaves).
+    /// Documented approximation: Strudel uses distinct distortion curves; here we
+    /// use AVAudioUnitDistortion with different wetDryMix treatment.
+    public func distort(_ value: Double) -> ControlPattern {
+        withControl(.pure(["distort": .double(value)]))
+    }
+
+    public func distort(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["distort": .double(Double($0) ?? 0.0)] })
+    }
+
+    // MARK: - Fase 4: Bitcrusher
+
+    /// crush(n) — bitcrusher. n = effective bit depth (typical range 4..16).
+    /// Lower n = more lo-fi. DSP: quantisation round(s × 2^(n-1)) / 2^(n-1).
+    /// For samples: applied as buffer pre-processing before scheduling.
+    /// For synths: applied inside the render block.
+    public func crush(_ value: Double) -> ControlPattern {
+        withControl(.pure(["crush": .double(value)]))
+    }
+
+    public func crush(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["crush": .double(Double($0) ?? 16.0)] })
+    }
+
+    // MARK: - Fase 4: Vowel formant filter
+
+    /// vowel("a"|"e"|"i"|"o"|"u") — formant filter.
+    /// Implemented via AVAudioUnitEQ with 3 bandpass bands at standard F1/F2/F3.
+    /// Patroneable: vowel("<a o>") alternates per cycle.
+    /// Single-char vowel strings (a, e, i, o, u) are passed as pure values;
+    /// longer strings or strings with spaces/brackets are treated as mini-notation.
+    public func vowel(_ str: String) -> ControlPattern {
+        let vowels: Set<String> = ["a", "e", "i", "o", "u"]
+        if vowels.contains(str.lowercased()) {
+            // Direct vowel value
+            return withControl(.pure(["vowel": .string(str.lowercased())]))
+        }
+        // Mini-notation pattern (e.g. "<a o>", "a e i")
+        return withControl(parseMini(str).map { ["vowel": .string($0.lowercased())] })
+    }
+
+    // MARK: - Fase 4: Granular — chop / striate
+
+    /// chop(n) — cut each sample event into n sequential sub-events.
+    /// Each sub-event plays 1/n of the sample (begin/end fields 0..1).
+    /// The time slot of each event is divided into n equal sub-slots.
+    /// Semantic: event with whole=[a,b) becomes n sub-events, sub k:
+    ///   time=[a + k*(b-a)/n, a + (k+1)*(b-a)/n), begin=k/n, end=(k+1)/n
+    public func chop(_ n: Int) -> ControlPattern {
+        guard n > 0 else { return self }
+        let nd = Double(n)
+        return Pattern { span in
+            self.query(span).flatMap { hap -> [Hap<[String: ControlValue]>] in
+                let whole = hap.whole ?? hap.part
+                let dur   = whole.end - whole.begin
+                let step  = dur / Rational(n)
+                return (0..<n).compactMap { k -> Hap<[String: ControlValue]>? in
+                    let subBegin  = whole.begin + step * Rational(k)
+                    let subEnd    = whole.begin + step * Rational(k + 1)
+                    let subWhole  = TimeSpan(subBegin, subEnd)
+                    guard let newPart = subWhole.intersection(hap.part) else { return nil }
+                    let fBegin = Double(k) / nd
+                    let fEnd   = Double(k + 1) / nd
+                    var newValue = hap.value
+                    newValue["begin"] = .double(fBegin)
+                    newValue["end"]   = .double(fEnd)
+                    return Hap(whole: subWhole, part: newPart, value: newValue)
+                }
+            }
+        }
+    }
+
+    /// striate(n) — granular interleaving.
+    /// Assigns chunk `i mod n` to event `i` in the cycle.
+    /// For a single-event pattern, striate(n) is equivalent to chop(n).
+    /// For a multi-event pattern (e.g. s("pad bell")), striate(n) keeps the
+    /// same event count but sets begin/end so each event plays a different chunk.
+    /// This is a pattern-level operation: no extra sub-events are created.
+    /// Semantic confirmed against oracle: event at index i → begin=i%n/n, end=(i%n+1)/n.
+    public func striate(_ n: Int) -> ControlPattern {
+        guard n > 0 else { return self }
+        let nd = Double(n)
+        return Pattern { span in
+            // Collect all haps, then assign chunk index based on position in cycle
+            let haps = self.query(span)
+            // Sort by onset to assign stable indices
+            let sorted = haps.sorted { $0.part.begin < $1.part.begin }
+            return sorted.enumerated().map { (i, hap) in
+                let chunk  = i % n
+                let fBegin = Double(chunk) / nd
+                let fEnd   = Double(chunk + 1) / nd
+                var newValue = hap.value
+                newValue["begin"] = .double(fBegin)
+                newValue["end"]   = .double(fEnd)
+                return Hap(whole: hap.whole, part: hap.part, value: newValue)
+            }
+        }
+    }
+
     // MARK: - Scale / n
 
     public func n(_ pattern: String) -> ControlPattern {

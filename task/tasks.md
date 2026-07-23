@@ -6,49 +6,34 @@ Plan derivado de [newchanges.md](../newchanges.md). La demo A/B ([devstrudeleeg.
 - [ ] Verificar de oído: código semilla suena igual en ambos lados (fixes de silencio ya aplicados)
 - [ ] Probar el .dmg en otra Mac offline
 
-## Fase 0 — Fundación (no negociable, primero)
-- [ ] Motor movido a su propio Swift package aislado (`MiniEngine/`), licenciable por separado
-- [ ] Core `Pattern<T> = (TimeSpan) -> [Hap<T>]` con tiempo racional
-- [ ] Parámetros como patrones (control maps): `.gain("<0.3 0.8>")` funciona
-- [ ] Soporte de comentarios `//` en el código del editor
-- [ ] Oracle harness: node genera fixtures JSON desde Strudel real; swift test compara
-- [ ] Subset existente migrado al nuevo core (stack, s, note, slow, fast, gain, room, cutoff, secuencia, `[]`, `<>`, `~`) con tests en verde
-- [ ] La app demo sigue compilando y sonando igual
-- [ ] Commit Fase 0
+## Fase 0 — Fundación ✅
+- [x] Motor en su propio Swift package aislado (`MiniEngine/`)
+- [x] Core `Pattern<T>` con tiempo racional (Rational/TimeSpan/Hap)
+- [x] Parámetros como patrones: `.gain("<0.3 0.8>")` funciona
+- [x] Comentarios `//` soportados
+- [x] Oracle harness (oracle/generate.mjs → fixtures JSON → OracleTests)
+- [x] Subset existente migrado, tests en verde; app demo intacta
+- [x] Commit Fase 0 (4cb9238)
 
-## Fase 1 — Tier 1 (demo-critical; al final se congela build)
-- [ ] `pan(x)` nativo
-- [ ] `delay` / `delaytime` / `delayfeedback` (AVAudioUnitDelay)
-- [ ] `euclid(k,n)` (Bjorklund)
-- [ ] Mini-notación `*` `!` `@`
-- [ ] `setcps` / `setcpm`
-- [ ] `n("0 2 4")` + `scale("C:minor")`
-- [ ] Congelar build demo (tag + dmg) para la presentación del jefe
-- [ ] Commit Fase 1
+## Fase 1 — Tier 1 ✅
+- [x] pan, delay/delaytime/delayfeedback, euclid(k,n[,rot]), `*` `!` `@`, setcps/setcpm, n+scale
+- [x] Build demo congelada: tag `demo-freeze-v1` + dist/DemoStrudel-demo-freeze-v1.dmg
+- [x] Commit Fase 1 (3c10099)
 
-## Fase 2 — Tier 3: álgebra de patrones
-- [ ] `rev`, `ply(n)`
-- [ ] `every(n, f)`
-- [ ] `sometimes` / `often` / `rarely` (RNG con seed)
-- [ ] `off(t, f)`, `jux(f)`, `struct("t ~ t t")`
-- [ ] Commit Fase 2
+## Fase 2 — Tier 3 ✅
+- [x] rev, ply, every, sometimes/often/rarely (PRNG con seed), off, jux, struct
+- [x] Commit Fase 2 (e38ab84)
 
-## Fase 3 — Tier 2: synths
-- [ ] `sound("sawtooth/square/sine/triangle")` (AVAudioSourceNode)
-- [ ] `attack`/`decay`/`sustain`/`release` (ADSR)
-- [ ] `lpf`/`hpf` + `resonance`
-- [ ] `speed(x)` (varispeed)
-- [ ] Commit Fase 3
+## Fase 3 — Tier 2 ✅
+- [x] sound() sine/sawtooth/square/triangle (polyBLEP), ADSR, lpf/hpf+resonance, speed
+- [x] Commit Fase 3 (3cf085d)
 
-## Fase 4 — Tier 4: texturas / DSP custom
-- [ ] `shape` / `distort` (AVAudioUnitDistortion)
-- [ ] `chorus` / `phaser`
-- [ ] `chop(n)` / `striate(n)` (granular)
-- [ ] `crush(n)` (bitcrusher)
-- [ ] `vowel` (formantes)
-- [ ] Commit Fase 4
+## Fase 4 — Tier 4 ✅
+- [x] shape/distort, crush (bitcrusher), chop/striate (granular), vowel (formantes)
+- [x] chorus/phaser: FUERA a propósito (sin LFO nativo no hay versión honesta; documentado en COMPATIBILITY.md)
+- [x] Commit Fase 4
 
-## Transversal
-- [ ] Doc viva `COMPATIBILITY.md` (función → estado → equivalencia Strudel), actualizada por fase
-- [ ] Clean-room: nunca leer el código .js de Strudel; oracle = comparar salidas
-- [ ] Ciclo por función: implementar → test oracle → commit
+## Transversal ✅
+- [x] COMPATIBILITY.md al día (Fases 0–4)
+- [x] Clean-room respetado; oracle solo como caja negra (45 fixtures, 128 haps)
+- [x] 218 tests en verde

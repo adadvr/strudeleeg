@@ -143,12 +143,16 @@ public struct CodeParser {
         // Fase 3: synths
         "attack", "decay", "sustain", "release",
         "lpf", "hpf", "resonance",
-        "speed"
+        "speed",
+        // Fase 4: DSP / granular
+        "shape", "distort", "crush", "vowel",
+        "chop", "striate",
+        // Fase 4: chorus/phaser (not implemented — forwarded with warning)
+        "chorus", "phaser"
     ]
 
     private let friendlyUnknown: Set<String> = [
-        "shape", "distort", "chorus", "phaser",
-        "chop", "striate", "crush", "vowel"
+        "chorus", "phaser"   // Fase 4: not implemented, warn but don't error
     ]
 
     private func parseLayerExpr(_ expr: String) throws -> ControlPattern {
@@ -404,6 +408,62 @@ public struct CodeParser {
                     let t = unquote(arg.trimmingCharacters(in: .whitespaces))
                     pattern = pattern.structGate(t)
                 }
+
+            // ── Fase 4: Distortion / Saturation ──────────────────────────────
+
+            case "shape":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.shape(v) }
+                    else                 { pattern = pattern.shape(unquote(t)) }
+                }
+
+            case "distort":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.distort(v) }
+                    else                 { pattern = pattern.distort(unquote(t)) }
+                }
+
+            // ── Fase 4: Bitcrusher ────────────────────────────────────────────
+
+            case "crush":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = Double(t) { pattern = pattern.crush(v) }
+                    else                 { pattern = pattern.crush(unquote(t)) }
+                }
+
+            // ── Fase 4: Vowel formant filter ──────────────────────────────────
+
+            case "vowel":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    pattern = pattern.vowel(unquote(t))
+                }
+
+            // ── Fase 4: Granular — chop / striate ────────────────────────────
+
+            case "chop":
+                if let arg = token.arg,
+                   let n = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.chop(n)
+                }
+
+            case "striate":
+                if let arg = token.arg,
+                   let n = Int(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.striate(n)
+                }
+
+            // ── Fase 4: chorus / phaser — not implemented ─────────────────────
+            // See COMPATIBILITY.md for rationale.
+
+            case "chorus":
+                print("[CodeParser] 'chorus' is not implemented in Fase 4 — skipping. See COMPATIBILITY.md")
+
+            case "phaser":
+                print("[CodeParser] 'phaser' is not implemented in Fase 4 — skipping. See COMPATIBILITY.md")
 
             default:
                 break

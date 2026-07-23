@@ -132,6 +132,9 @@ final class SynthVoice {
     private var relSamp: Int    = 0    // release in samples
     private var noteDurSamp: Int = 0   // duration to sustain-end (start of release)
 
+    // Fase 4: bitcrusher — 0 means disabled, >0 means active with that bit depth
+    private var crushBits: Double = 0.0   // 0 = no crush
+
     // ── Oscillator state ────────────────────────────────────────────────────
     private var phase:    Double = 0.0
     private var dt:       Double = 0.0  // phase increment per sample
@@ -159,7 +162,8 @@ final class SynthVoice {
         release:     Double,
         durationSec: Double,
         sampleRate:  Double,
-        birthSample: Int
+        birthSample: Int,
+        crushBits:   Double = 0.0
     ) {
         self.freq        = freq
         self.gain        = gain
@@ -179,6 +183,7 @@ final class SynthVoice {
         self.stage             = .attack
         self.isActive          = true
         self.birthSample       = birthSample
+        self.crushBits         = crushBits
     }
 
     /// Render `frameCount` samples into `buffer`, adding to existing content.
@@ -261,8 +266,18 @@ final class SynthVoice {
                 sample = sin(2.0 * Double.pi * phase)
             }
 
-            // ── Apply envelope + gain, accumulate ──────────────────────────
-            buffer[i] += Float(sample * env * gain)
+            // ── Apply envelope + gain ───────────────────────────────────────
+            var out = Float(sample * env * gain)
+
+            // ── Bitcrusher (Fase 4): applied post-envelope in render block ──
+            // Formula: round(s × 2^(bits-1)) / 2^(bits-1) — public domain DSP
+            if crushBits > 0 {
+                let levels = Float(pow(2.0, crushBits - 1.0))
+                out = Foundation.round(out * levels) / levels
+            }
+
+            // ── Accumulate ─────────────────────────────────────────────────
+            buffer[i] += out
 
             // ── Advance phase ───────────────────────────────────────────────
             phase += dt
@@ -279,11 +294,13 @@ final class SynthVoice {
 /// Hosts a voice pool; the AVAudioSourceNode mixes all voices per render call.
 final class SynthLayer {
 
-    let synthName: String
+    let synthName:  String
     let sourceNode: AVAudioSourceNode
     let eq:         AVAudioUnitEQ
     let reverb:     AVAudioUnitReverb
     let delay:      AVAudioUnitDelay
+    let distortion: AVAudioUnitDistortion   // Fase 4: shape/distort
+    let vowelEQ:    AVAudioUnitEQ           // Fase 4: vowel formant (3 bands)
     let panner:     AVAudioMixerNode
 
     private static let voicePoolSize = 8
@@ -327,6 +344,24 @@ final class SynthLayer {
         delayNode.feedback      = 50
         delayNode.lowPassCutoff = 15_000
         self.delay = delayNode
+
+        // ── Distortion (Fase 4: shape/distort) ─────────────────────────────
+        let distortionNode = AVAudioUnitDistortion()
+        distortionNode.loadFactoryPreset(.multiDistortedFunk)
+        distortionNode.preGain   = 0
+        distortionNode.wetDryMix = 0   // fully dry until shape/distort called
+        self.distortion = distortionNode
+
+        // ── Vowel EQ (Fase 4: formant filter, 3 bands) ─────────────────────
+        let vowelEQNode = AVAudioUnitEQ(numberOfBands: 3)
+        for i in 0..<3 {
+            let b = vowelEQNode.bands[i]
+            b.filterType = .parametric
+            b.gain       = 6.0
+            b.bandwidth  = 0.5
+            b.bypass     = true
+        }
+        self.vowelEQ = vowelEQNode
 
         // ── Panner ──────────────────────────────────────────────────────────
         self.panner = AVAudioMixerNode()
@@ -401,7 +436,8 @@ final class SynthLayer {
         sustain:     Double,
         release:     Double,
         durationSec: Double,
-        sampleRate:  Double
+        sampleRate:  Double,
+        crushBits:   Double = 0.0
     ) {
         renderLock.lock()
         defer { renderLock.unlock() }
@@ -426,7 +462,8 @@ final class SynthLayer {
             release:     release,
             durationSec: durationSec,
             sampleRate:  sampleRate,
-            birthSample: renderSampleCount
+            birthSample: renderSampleCount,
+            crushBits:   crushBits
         )
     }
 
@@ -464,6 +501,95 @@ final class SynthLayer {
         if let t = time     { delay.delayTime = t }
         if let f = feedback { delay.feedback  = Float(f * 100.0) }
     }
+
+    // MARK: - Fase 4: Distortion
+
+    /// Apply shape/distort saturation level (0..1) → wetDryMix (0..100).
+    /// Both shape() and distort() use this method; the scheduler passes
+    /// distort's value if both are present, else shape.
+    func applyDistortion(_ level: Double) {
+        distortion.wetDryMix = Float(level * 100.0)
+    }
+
+    // MARK: - Fase 4: Vowel formant filter
+
+    /// Apply vowel formant frequencies ("a"|"e"|"i"|"o"|"u").
+    /// Uses the same vowelFormants table as PatternScheduler.
+    func applyVowel(_ v: String) {
+        let key = v.lowercased()
+        let formants: [String: (f1: Float, f2: Float, f3: Float)] = [
+            "a": (730,  1090, 2440),
+            "e": (530,  1840, 2480),
+            "i": (390,  1990, 2550),
+            "o": (570,   840, 2410),
+            "u": (440,  1020, 2240),
+        ]
+        guard let f = formants[key] else { return }
+        let freqs: [Float] = [f.f1, f.f2, f.f3]
+        for i in 0..<3 {
+            let b = vowelEQ.bands[i]
+            b.frequency = freqs[i]
+            b.bypass    = false
+        }
+    }
+}
+
+// MARK: - Bitcrusher DSP
+
+/// Apply bitcrusher quantisation to a sample buffer in-place.
+///
+/// Formula (public-domain): quantize(s) = round(s × 2^(bits-1)) / 2^(bits-1)
+/// This maps the float signal to a reduced set of amplitude levels.
+///
+/// bits: effective bit depth. Range: 1..16 practical.
+///   bits=16 → 32768 levels → near-transparent
+///   bits=8  → 128 levels → lo-fi
+///   bits=4  → 8 levels → heavy lo-fi
+///   bits=1  → 1 level → 1-bit (extreme)
+///
+/// Input samples assumed in range -1..1 (same as SynthVoice output).
+public func applyBitcrusher(buffer: UnsafeMutablePointer<Float>, frameCount: Int, bits: Double) {
+    let bitsClamp = max(1.0, min(16.0, bits))
+    let levels = pow(2.0, bitsClamp - 1.0)   // 2^(bits-1)
+    let levelsF = Float(levels)
+    let invLevels = 1.0 / levelsF
+    for i in 0..<frameCount {
+        let s = buffer[i]
+        buffer[i] = Foundation.round(s * levelsF) * invLevels
+    }
+}
+
+/// Apply bitcrusher quantisation to an AVAudioPCMBuffer, returning a new buffer.
+/// Used for sample-based layers: creates a quantised copy of the buffer before scheduling.
+///
+/// Parameters:
+///   buffer: source PCM buffer (must be Float32 non-interleaved).
+///   bits:   effective bit depth (1..16).
+/// Returns: a new AVAudioPCMBuffer with quantised samples, or the original if format unsupported.
+public func bitcrushedBuffer(_ buffer: AVAudioPCMBuffer, bits: Double) -> AVAudioPCMBuffer {
+    guard let floatChannels = buffer.floatChannelData else { return buffer }
+    let frameCount = Int(buffer.frameLength)
+    guard frameCount > 0 else { return buffer }
+    guard let result = AVAudioPCMBuffer(
+        pcmFormat: buffer.format,
+        frameCapacity: buffer.frameCapacity
+    ) else { return buffer }
+    result.frameLength = buffer.frameLength
+
+    let channelCount = Int(buffer.format.channelCount)
+    let bitsClamp = max(1.0, min(16.0, bits))
+    let levels    = Float(pow(2.0, bitsClamp - 1.0))
+    let invLevels = 1.0 / levels
+
+    guard let dstChannels = result.floatChannelData else { return buffer }
+    for ch in 0..<channelCount {
+        let src = floatChannels[ch]
+        let dst = dstChannels[ch]
+        for i in 0..<frameCount {
+            dst[i] = Foundation.round(src[i] * levels) * invLevels
+        }
+    }
+    return result
 }
 
 // MARK: - Resonance → bandwidth mapping

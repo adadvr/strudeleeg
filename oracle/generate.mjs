@@ -373,6 +373,141 @@ const CASES = [
     },
   },
 
+  // ── Fase 4: control-field oracle cases ──────────────────────────────────────
+  // These verify that the PATTERN LAYER emits the correct fields.
+  // DSP effects are unit-tested in Swift; oracle just checks field names/values.
+
+  {
+    // shape(x) — saturation level 0..1
+    label: 's("pad").shape(0.5)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'pad' }).set(pure({ shape: 0.5 }));
+    },
+  },
+
+  {
+    // distort(x) — distortion level 0..1
+    label: 's("pad").distort(0.8)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'pad' }).set(pure({ distort: 0.8 }));
+    },
+  },
+
+  {
+    // crush(n) — bit depth (e.g. 4 bits = very lo-fi, 16 = near-transparent)
+    label: 's("pad").crush(4)',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'pad' }).set(pure({ crush: 4 }));
+    },
+  },
+
+  {
+    // crush as pattern
+    label: 's("pad bell").crush(8)',
+    spanCycles: 1,
+    build() {
+      return fastcat(pure({ s: 'pad' }), pure({ s: 'bell' }))
+        .set(pure({ crush: 8 }));
+    },
+  },
+
+  {
+    // vowel("a") — formant filter, single vowel
+    label: 's("sawtooth").vowel("a")',
+    spanCycles: 1,
+    build() {
+      return pure({ s: 'sawtooth' }).set(pure({ vowel: 'a' }));
+    },
+  },
+
+  {
+    // vowel("<a o>") — alternating vowel per cycle
+    label: 's("sawtooth").vowel("<a o>")',
+    spanCycles: 2,
+    build() {
+      const vPat = slowcat(pure({ vowel: 'a' }), pure({ vowel: 'o' }));
+      return pure({ s: 'sawtooth' }).set(vPat);
+    },
+  },
+
+  // ── Fase 4: chop(n) / striate(n) — granular sub-events ─────────────────────
+  // chop(n): cuts EACH event into n sequential sub-events, each covering 1/n of
+  // the sample (begin/end fields 0..1) and 1/n of the time slot.
+  // For s("pad") (1 event/cycle), chop(4) → 4 sub-events.
+  // Event k: time slot = [k/n, (k+1)/n], begin=k/n, end=(k+1)/n.
+  // (begin/end are fractional positions within the sample, 0..1)
+  {
+    label: 's("pad").chop(4)',
+    spanCycles: 1,
+    build() {
+      // Model: 4 sub-events, each covers 1/4 of cycle and 1/4 of sample
+      // begin/end = fractional sample position
+      return fastcat(
+        pure({ s: 'pad', begin: 0,    end: 0.25 }),
+        pure({ s: 'pad', begin: 0.25, end: 0.5  }),
+        pure({ s: 'pad', begin: 0.5,  end: 0.75 }),
+        pure({ s: 'pad', begin: 0.75, end: 1.0  }),
+      );
+    },
+  },
+
+  {
+    // chop(2) on a 2-event pattern: 4 events total
+    label: 's("pad bell").chop(2)',
+    spanCycles: 1,
+    build() {
+      // pad: [0,1/2) → 2 sub-events at [0,1/4) and [1/4,1/2)
+      // bell: [1/2,1) → 2 sub-events at [1/2,3/4) and [3/4,1)
+      return fastcat(
+        pure({ s: 'pad',  begin: 0,   end: 0.5  }),
+        pure({ s: 'pad',  begin: 0.5, end: 1.0  }),
+        pure({ s: 'bell', begin: 0,   end: 0.5  }),
+        pure({ s: 'bell', begin: 0.5, end: 1.0  }),
+      );
+    },
+  },
+
+  // ── Fase 4: striate(n) — granular interleaving ──────────────────────────────
+  // striate(n): Like chop but INTERLEAVES chunks across the pattern's events.
+  // For s("pad") (1 event/cycle), striate(4) is same as chop(4).
+  // For s("pad bell").striate(2): the two events share chunk slots:
+  //   event 0 (pad) → chunk 0 (begin=0, end=0.5)
+  //   event 1 (bell) → chunk 1 (begin=0.5, end=1.0)
+  // (striate gives each step a different chunk of the sample, cycling through chunks)
+  {
+    // striate(n): event i in the cycle gets chunk (i mod n).
+    // For s("pad") (1 event/cycle), striate(4): event 0 → chunk 0 → begin=0, end=0.25
+    // Result: 1 event with begin=0, end=0.25 (NOT 4 events like chop).
+    // The key semantic difference from chop: striate does NOT create new events;
+    // it assigns a chunk index to each EXISTING event based on its position.
+    label: 's("pad").striate(4)',
+    spanCycles: 1,
+    build() {
+      // striate(4) on a single event: event 0 gets chunk 0 → begin=0/4, end=1/4
+      return pure({ s: 'pad', begin: 0, end: 0.25 });
+    },
+  },
+
+  {
+    // striate(2) on 2-event pattern: each event gets different chunk (interleaved)
+    // pad → chunk 0 [begin=0, end=0.5], bell → chunk 1 [begin=0.5, end=1.0]
+    // Both events keep their original time slots; only begin/end differ
+    label: 's("pad bell").striate(2)',
+    spanCycles: 1,
+    build() {
+      // striate interleaves: event i → chunk (i mod n)
+      // pad (event 0): begin=0/2=0, end=1/2=0.5, time=[0,1/2)
+      // bell (event 1): begin=1/2=0.5, end=2/2=1.0, time=[1/2,1)
+      return fastcat(
+        pure({ s: 'pad',  begin: 0,   end: 0.5 }),
+        pure({ s: 'bell', begin: 0.5, end: 1.0 }),
+      );
+    },
+  },
+
   // ── Fase 2 / Tier 3: Pattern algebra ────────────────────────────────────────
 
   // rev — reverses the pattern within each cycle
