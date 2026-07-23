@@ -379,6 +379,8 @@ public struct CodeParser {
         // Fase 5: bank + ADSR aliases
         "bank",
         "dec", "att", "sus", "rel",
+        // P0-4: orbit
+        "orbit",
         // P0-2: Señales continuas — names used as top-level expressions in signal args
         "sine", "saw", "isaw", "tri", "square", "cosine", "rand", "perlin",
         "range", "rangex", "segment", "seg"
@@ -715,6 +717,15 @@ public struct CodeParser {
                 }
 
             // ── Fase 5: ADSR short aliases ────────────────────────────────────
+
+            // ── P0-4: orbit ───────────────────────────────────────────────────
+
+            case "orbit":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.orbit(v) }
+                    else                      { pattern = pattern.orbit(unquote(t)) }
+                }
 
             case "dec":
                 if let arg = token.arg {

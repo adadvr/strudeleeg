@@ -353,6 +353,25 @@ extension Pattern where T == [String: ControlValue] {
         return withControl(parseMini(name).map { ["bank": .string($0)] })
     }
 
+    // MARK: - P0-4: orbit
+
+    /// orbit(n) — route this layer/pattern to an independent orbit bus.
+    /// Each orbit has its own reverb (room+size) and delay chain feeding mainMixer.
+    /// Layers on the same orbit share the same reverb/delay tail (as in Strudel/SuperDirt).
+    ///
+    /// Default: orbit 1 (Strudel public docs: "By default all patterns use orbit 1").
+    /// Verified: strudel.cc/learn/effects states the orbit default is 1, and patterns
+    /// without an explicit .orbit() share orbit 1.
+    ///
+    /// Patroneable: .orbit("<1 2>") alternates orbits per cycle.
+    public func orbit(_ value: Double) -> ControlPattern {
+        withControl(.pure(["orbit": .double(value)]))
+    }
+
+    public func orbit(_ pattern: String) -> ControlPattern {
+        withControl(parseMini(pattern).map { ["orbit": .double(Double($0) ?? 1.0)] })
+    }
+
     // MARK: - Fase 4: Granular — chop / striate
 
     /// chop(n) — cut each sample event into n sequential sub-events.

@@ -76,6 +76,40 @@ private func polyBLEP(_ t: Double, dt: Double) -> Double {
     return 0.0
 }
 
+// MARK: - Biquad filter (for AudioValidate T10 — same formulas as SynthVoice.swift)
+// Audio EQ Cookbook lowpass/highpass biquad (public domain).
+
+private struct OVBiquadFilter {
+    var nb0: Double = 1; var nb1: Double = 0; var nb2: Double = 0
+    var na1: Double = 0; var na2: Double = 0
+    var z1:  Double = 0; var z2:  Double = 0
+    var bypass: Bool = true
+
+    @inline(__always) mutating func process(_ x: Double) -> Double {
+        if bypass { return x }
+        let y = nb0 * x + z1
+        z1 = nb1 * x - na1 * y + z2
+        z2 = nb2 * x - na2 * y
+        return y
+    }
+}
+
+private func ovBiquadLPF(fc: Double, q: Double, fs: Double) -> OVBiquadFilter {
+    let fcC = max(1, min(fc, fs * 0.4999))
+    let qC  = max(0.01, min(q, 50.0))
+    let w0 = 2.0 * Double.pi * fcC / fs
+    let alpha = sin(w0) / (2.0 * qC)
+    let cosW  = cos(w0)
+    let b0 = (1.0 - cosW) / 2.0
+    let b1 = 1.0 - cosW
+    let b2 = (1.0 - cosW) / 2.0
+    let a0 = 1.0 + alpha
+    let a1 = -2.0 * cosW
+    let a2 = 1.0 - alpha
+    return OVBiquadFilter(nb0: b0/a0, nb1: b1/a0, nb2: b2/a0, na1: a1/a0, na2: a2/a0,
+                          z1: 0, z2: 0, bypass: false)
+}
+
 // MARK: - Offline Voice
 // Mirrors SynthVoice behaviour without requiring its internal access.
 
@@ -105,9 +139,12 @@ private final class OfflineVoice {
     private var triInteg:           Double = 0.0
     private var samplesSinceOnset:  Int = 0
 
+    // P0-3: per-voice biquad LPF (same Audio EQ Cookbook formulas as SynthVoice)
+    private var lpfFilter = OVBiquadFilter()
+
     func trigger(waveform: String, freq: Double, gain: Double,
                  attack: Double, decay: Double, sustain: Double, release: Double,
-                 durationSec: Double, birthSample: Int) {
+                 durationSec: Double, birthSample: Int, lpfHz: Double? = nil) {
         self.waveform         = waveform.lowercased()
         self.gain             = gain
         self.dt               = freq / sampleRate
@@ -133,6 +170,13 @@ private final class OfflineVoice {
         let Lpow = pow(L, 0.5 / dtv)          // L^(N/2)
         let denom = max(1e-9, 1.0 - Lpow)
         self.triDrive = max(1e-6, min(2.0, (1.0 - L) * (1.0 + Lpow) / denom))
+
+        // P0-3: configure per-voice LPF
+        if let fc = lpfHz {
+            lpfFilter = ovBiquadLPF(fc: fc, q: 0.707, fs: sampleRate)
+        } else {
+            lpfFilter = OVBiquadFilter()  // bypass=true
+        }
     }
 
     /// Render frameCount samples into buffer (accumulate). Returns false when idle.
@@ -188,7 +232,8 @@ private final class OfflineVoice {
                 sample = sin(2.0 * Double.pi * phase)
             }
 
-            buffer[i] += Float(sample * env * gain) * synthHeadroom
+            let filteredSample = lpfFilter.bypass ? sample : lpfFilter.process(sample)
+            buffer[i] += Float(filteredSample * env * gain) * synthHeadroom
 
             phase += dt
             if phase >= 1.0 { phase -= 1.0 }
@@ -219,6 +264,7 @@ private final class OfflineVoicePool {
         let release:     Double
         let durationSec: Double
         let layerIdx:    Int    // Bug 1 fix: _layer field from control pattern
+        let lpfHz:       Double? // P0-3: per-event biquad LPF
         var triggered:   Bool = false
     }
 
@@ -230,7 +276,7 @@ private final class OfflineVoicePool {
 
     func add(onsetSec: Double, waveform: String, freq: Double, gain: Double,
              attack: Double, decay: Double, sustain: Double, release: Double,
-             durationSec: Double, layerIdx: Int = 0) {
+             durationSec: Double, layerIdx: Int = 0, lpfHz: Double? = nil) {
         events.append(PendingEvent(
             onsetFrame:  Int(onsetSec * sampleRate),
             waveform:    waveform,
@@ -241,7 +287,8 @@ private final class OfflineVoicePool {
             sustain:     sustain,
             release:     release,
             durationSec: durationSec,
-            layerIdx:    layerIdx
+            layerIdx:    layerIdx,
+            lpfHz:       lpfHz
         ))
     }
 
@@ -321,7 +368,8 @@ private final class OfflineVoicePool {
                           sustain:     ev.sustain,
                           release:     ev.release,
                           durationSec: ev.durationSec,
-                          birthSample: birthCounter)
+                          birthSample: birthCounter,
+                          lpfHz:       ev.lpfHz)
 
             if relFrame > 0 {
                 let tmp = UnsafeMutablePointer<Float>.allocate(capacity: relFrame)
@@ -363,7 +411,8 @@ private final class OfflineVoicePool {
                           sustain:     ev.sustain,
                           release:     ev.release,
                           durationSec: ev.durationSec,
-                          birthSample: birthCounter)
+                          birthSample: birthCounter,
+                          lpfHz:       ev.lpfHz)
 
             if relFrame > 0 {
                 let tmp = UnsafeMutablePointer<Float>.allocate(capacity: relFrame)
@@ -525,6 +574,9 @@ func renderPattern(code: String, durationSec: Double,
                          - (hap.whole ?? hap.part).begin.toDouble
         let durSec = max(0.05, hapDurCycles * effectiveCycleLen)
 
+        // P0-3: per-event biquad LPF (from hap's lpf/cutoff field)
+        let hapLPF = hap.value["lpf"]?.doubleValue ?? hap.value["cutoff"]?.doubleValue
+
         pool.add(onsetSec:    onsetSec,
                  waveform:    sVal,
                  freq:        freq,
@@ -534,7 +586,8 @@ func renderPattern(code: String, durationSec: Double,
                  sustain:     sustain,
                  release:     release,
                  durationSec: durSec,
-                 layerIdx:    layerIdx)
+                 layerIdx:    layerIdx,
+                 lpfHz:       hapLPF)
     }
 
     var output = [Float](repeating: 0, count: totalSamples)
@@ -961,6 +1014,43 @@ do {
     } else {
         check("T9c3: stack pattern parses OK", false, "parse failed")
     }
+}
+
+// ─── Test 10 (P0-3): Biquad per-voice — note with lpf(400) attenuates harmonics ≥-20dB ─
+
+print("\n=== TEST 10 (P0-3): note(\"a3\").sound(\"sawtooth\").lpf(400) — harmonics ≥ 800Hz ≥ -20dB attenuation ===")
+do {
+    // Two renders: sawtooth A3 (220 Hz) — one with lpf(400), one unfiltered.
+    // The offline harness now applies per-event biquad LPF from the hap's lpf field
+    // through OfflineVoice.lpfFilter (same Audio EQ Cookbook formulas as SynthVoice).
+    // Use lpf(200) so fc=200 Hz, analysis band 800-8000 Hz starts at 4×fc.
+    // 2nd-order Butterworth at 4×fc: |H|≈-24 dB; integrated band well below -20 dB.
+    let codeFiltered   = #"note("a3").sound("sawtooth").lpf(200)"#
+    let codeUnfiltered = #"note("a3").sound("sawtooth")"#
+
+    let bufFiltered   = renderPattern(code: codeFiltered,   durationSec: 2.0)
+    let bufUnfiltered = renderPattern(code: codeUnfiltered, durationSec: 2.0)
+
+    let w = 0.3   // analysis window start (skip attack transient + filter ramp)
+
+    // Fundamental (220 Hz) should still be present in the filtered output.
+    // lpf(200) is at 200 Hz; fundamental of a3 is 220 Hz (just above fc, still audible).
+    let fundFilt = hasPeakNear(buffer: bufFiltered, windowStartSec: w, expectedHz: 220.0)
+    check("T10a: sawtooth.lpf(200) → fundamental 220 Hz detected (per-voice biquad)",
+          fundFilt.found,
+          "220 Hz: detected=\(String(format: "%.1f", fundFilt.actualHz)) Hz, found=\(fundFilt.found)")
+
+    // Energy above 800 Hz should be attenuated ≥ -20 dB (factor ≥ 10× attenuation).
+    // 2nd-order Butterworth LPF at 200 Hz: at 800 Hz (4×fc), |H|²=1/(1+4^4)≈-24 dB.
+    // At 1600 Hz (8×fc) ≈ -36 dB. The integrated band energy 800-8000 Hz is well below -20 dB.
+    let highUnfilt  = bandEnergy(buffer: bufUnfiltered, windowStartSec: w, windowDuration: 0.4, lowHz: 800, highHz: 8000)
+    let highFilt    = bandEnergy(buffer: bufFiltered,   windowStartSec: w, windowDuration: 0.4, lowHz: 800, highHz: 8000)
+    let attenuation = highUnfilt > 0 ? Double(highFilt) / Double(highUnfilt) : 1.0
+    let attDB       = 20.0 * log10(max(attenuation, 1e-9))
+
+    check("T10b: sawtooth.lpf(200) per-voice biquad → >800 Hz attenuated ≥ -20 dB",
+          attenuation < 0.1,
+          "unfilt=\(String(format: "%.4f", highUnfilt)), filt=\(String(format: "%.4f", highFilt)), attenuation=\(String(format: "%.4f", attenuation)) (\(String(format: "%.1f", attDB)) dB)")
 }
 
 // MARK: - Summary Table

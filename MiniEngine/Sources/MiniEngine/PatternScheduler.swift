@@ -98,6 +98,54 @@ private final class LayerGroup {
     }
 }
 
+// MARK: - OrbitBus (P0-4)
+
+/// One orbit bus: a shared reverb + delay chain that feeds mainMixer.
+/// All synth/sample layers on the same orbit number share this bus.
+///
+/// Architecture:
+///   Layer panner → orbitGain → orbitReverb → orbitDelay → mainMixer
+///
+/// room/delay params are updated from the last event that fires on this orbit.
+/// This is the documented compromise: see COMPATIBILITY.md P0-4.
+/// The orbitGain node is public so it can be attenuated for duck (P1-5 prep).
+///
+/// Default orbit: 1 (Strudel public docs: "By default all patterns use orbit 1",
+/// verified at strudel.cc/learn/effects). Patterns without .orbit() use orbit 1.
+final class OrbitBus {
+    let orbitIdx:  Int
+    let gain:      AVAudioMixerNode     // entry point from all layers in this orbit; duck target (P1-5 prep)
+    let reverb:    AVAudioUnitReverb    // room parameter
+    let delay:     AVAudioUnitDelay     // delay wet/time/feedback
+
+    init(orbitIdx: Int) {
+        self.orbitIdx = orbitIdx
+        self.gain  = AVAudioMixerNode()
+        let rv = AVAudioUnitReverb()
+        rv.loadFactoryPreset(.mediumHall)
+        rv.wetDryMix = 0
+        self.reverb = rv
+        let dl = AVAudioUnitDelay()
+        dl.wetDryMix     = 0
+        dl.delayTime     = 0.25
+        dl.feedback      = 50
+        dl.lowPassCutoff = 15_000
+        self.delay = dl
+    }
+
+    /// Update room wet mix (0..1 → 0..100 wetDryMix).
+    func applyRoom(_ room: Double) {
+        reverb.wetDryMix = Float(room * 100.0)
+    }
+
+    /// Update delay params.
+    func applyDelay(wet: Double, time: Double?, feedback: Double?) {
+        delay.wetDryMix = Float(wet * 100.0)
+        if let t = time     { delay.delayTime = t }
+        if let f = feedback { delay.feedback  = Float(f * 100.0) }
+    }
+}
+
 // MARK: - Layer/name pair
 
 /// Identifies a unique (layer-index, audio-name) pair used as a chain key.
@@ -136,6 +184,16 @@ public final class PatternScheduler {
     private var groups: [String: LayerGroup] = [:]                  // keyed by "\(layerIdx)#\(sampleName)"
     private var synthLayers: [String: SynthLayer] = [:]             // keyed by "\(layerIdx)#\(synthName)"
     private let poolQueue = DispatchQueue(label: "com.miniengine.scheduler", qos: .userInteractive)
+
+    // P0-4: orbit buses keyed by orbit index (default orbit = 1 per Strudel docs).
+    // Each orbit has a shared reverb+delay chain. Layers connect their panner to the
+    // orbit gain node (instead of directly to mainMixer). room/delay on the orbit bus
+    // are updated per-event (last event wins per orbit — documented compromise).
+    private var orbitBuses: [Int: OrbitBus] = [:]
+
+    /// Default orbit index — Strudel public docs: "By default all patterns use orbit 1".
+    /// Verified at strudel.cc/learn/effects (orbit section).
+    public static let defaultOrbit: Int = 1
 
     // MARK: - Layer key helper
 
@@ -178,10 +236,12 @@ public final class PatternScheduler {
         let scanSpan = TimeSpan(Rational(0), Rational(4))
         let previewHaps = pattern.query(scanSpan)
 
-        // Collect (layerIdx, sName) pairs
+        // Collect (layerIdx, sName) pairs + orbit assignments
         var samplePairs: Set<LayerNamePair> = []
         var synthPairs:  Set<LayerNamePair> = []
         var sampleNames: Set<String>        = []
+        // P0-4: map each LayerNamePair to its orbit index (first-seen wins; default 1)
+        var pairOrbit:   [LayerNamePair: Int] = [:]
 
         for hap in previewHaps {
             guard let sVal = hap.value["s"]?.stringValue else { continue }
@@ -189,6 +249,9 @@ public final class PatternScheduler {
             let sName    = bankName.isEmpty ? sVal : "\(bankName)_\(sVal)"
             let layerIdx = Int(hap.value["_layer"]?.doubleValue ?? 0.0)
             let pair     = LayerNamePair(layerIdx: layerIdx, name: sName)
+            // orbit field: default = PatternScheduler.defaultOrbit (1)
+            let orbitIdx = Int(hap.value["orbit"]?.doubleValue ?? Double(PatternScheduler.defaultOrbit))
+            if pairOrbit[pair] == nil { pairOrbit[pair] = orbitIdx }
             if isSynthName(sName) {
                 synthPairs.insert(pair)
             } else {
@@ -197,6 +260,12 @@ public final class PatternScheduler {
             }
         }
 
+        // Build orbit buses first (before groups/layers so connections work)
+        let neededOrbits = Set(pairOrbit.values)
+        for orbitIdx in neededOrbits { _ = buildOrbitBus(orbitIdx: orbitIdx) }
+        // Ensure default orbit always exists
+        _ = buildOrbitBus(orbitIdx: PatternScheduler.defaultOrbit)
+
         do {
             try preloadBuffers(for: sampleNames)
         } catch {
@@ -204,8 +273,8 @@ public final class PatternScheduler {
             return
         }
 
-        buildGroups(for: samplePairs)
-        buildSynthLayers(for: synthPairs)
+        buildGroups(for: samplePairs, pairOrbit: pairOrbit)
+        buildSynthLayers(for: synthPairs, pairOrbit: pairOrbit)
 
         if !audioEngine.isRunning {
             do {
@@ -262,6 +331,14 @@ public final class PatternScheduler {
             audioEngine.detach(layer.panner)
         }
         synthLayers = [:]
+
+        // P0-4: detach and remove orbit buses
+        for bus in orbitBuses.values {
+            audioEngine.detach(bus.gain)
+            audioEngine.detach(bus.reverb)
+            audioEngine.detach(bus.delay)
+        }
+        orbitBuses = [:]
 
         if audioEngine.isRunning {
             audioEngine.stop()
@@ -322,6 +399,8 @@ public final class PatternScheduler {
             let delayTimeVal  = hap.value["delaytime"]?.doubleValue
             let delayFeedVal  = hap.value["delayfeedback"]?.doubleValue
             let speedValue    = hap.value["speed"]?.doubleValue
+            // P0-4: orbit index (default = PatternScheduler.defaultOrbit = 1)
+            let orbitVal      = Int(hap.value["orbit"]?.doubleValue ?? Double(PatternScheduler.defaultOrbit))
             let attackVal     = hap.value["attack"]?.doubleValue
             let decayVal      = hap.value["decay"]?.doubleValue
             let sustainVal    = hap.value["sustain"]?.doubleValue
@@ -341,19 +420,21 @@ public final class PatternScheduler {
 
             if isSynthName(sName) {
                 // ── Synth route ─────────────────────────────────────────────
+                // P0-4: update orbit bus room/delay with this event's values (last wins per orbit).
+                let orbitBus = buildOrbitBus(orbitIdx: orbitVal)
+                if let r = roomValue { orbitBus.applyRoom(r) }
+                if let d = delayValue {
+                    orbitBus.applyDelay(wet: d, time: delayTimeVal, feedback: delayFeedVal)
+                }
                 dispatchSynthHap(
                     synthName:    sName,
                     layerIdx:     layerIdx,
                     midiNote:     midiNote ?? Double(synthDefaultMIDI),
                     gain:         gainValue,
-                    room:         roomValue,
                     lpf:          cutoffValue,
                     hpf:          hpfValue,
                     resonance:    resonanceVal,
                     pan:          panValue,
-                    delay:        delayValue,
-                    delaytime:    delayTimeVal,
-                    delayfeedback: delayFeedVal,
                     attack:       attackVal   ?? ADSRDefaults.attack,
                     decay:        decayVal    ?? ADSRDefaults.decay,
                     sustain:      sustainVal  ?? ADSRDefaults.sustain,
@@ -367,6 +448,12 @@ public final class PatternScheduler {
                 )
             } else {
                 // ── Sample route ────────────────────────────────────────────
+                // P0-4: update orbit bus room/delay with this event's values (last wins per orbit).
+                let orbitBus = buildOrbitBus(orbitIdx: orbitVal)
+                if let r = roomValue { orbitBus.applyRoom(r) }
+                if let d = delayValue {
+                    orbitBus.applyDelay(wet: d, time: delayTimeVal, feedback: delayFeedVal)
+                }
                 // Detect explicit ADSR parameters (nil = use default/no-op)
                 // If NONE of attack/decay/sustain/release are set by the user,
                 // we skip envelope processing entirely (backward-compat: no change in sound).
@@ -379,6 +466,8 @@ public final class PatternScheduler {
                     gain:          gainValue,
                     room:          roomValue,
                     cutoff:        cutoffValue,
+                    hpf:           hpfValue,           // P0-3: per-event HPF
+                    resonance:     resonanceVal,        // P0-3: per-event resonance Q
                     pan:           panValue,
                     delay:         delayValue,
                     delaytime:     delayTimeVal,
@@ -409,6 +498,8 @@ public final class PatternScheduler {
         gain:          Double,
         room:          Double?,
         cutoff:        Double?,
+        hpf:           Double? = nil,        // P0-3: per-event HPF for samples
+        resonance:     Double? = nil,        // P0-3: per-event resonance Q for samples
         pan:           Double?,
         delay:         Double?,
         delaytime:     Double?,
@@ -466,22 +557,12 @@ public final class PatternScheduler {
             group.panner.pan = avPan
         }
 
-        // Apply per-chain room/cutoff (compromise: see doc above)
-        if let r = room {
-            group.reverb.wetDryMix = Float(r * 100)
-        }
-        if let c = cutoff {
-            group.eq.bands[0].frequency = Float(c)
-            group.eq.bands[0].bypass    = false
-        }
-
-        // Apply delay (wet mix 0..1 → wetDryMix 0..100).
-        // Defaults if delay set but delaytime/delayfeedback not: 0.25s / 0.5 feedback.
-        if let d = delay {
-            group.delay.wetDryMix  = Float(d * 100)
-            group.delay.delayTime  = delaytime ?? 0.25
-            group.delay.feedback   = Float((delayfeedback ?? 0.5) * 100)
-        }
+        // P0-4: room/delay are now on the orbit bus (applied in scheduleWindow before this call).
+        // The per-layer reverb/delay nodes are not connected to the graph.
+        // Nothing to apply here for room or delay.
+        // P0-3: lpf/cutoff and hpf for samples are applied as buffer preprocessing below
+        // (see biquad buffer processing section). The EQ node (group.eq) remains in the
+        // graph but bypassed (AVAudioUnitEQ with band.bypass=true) — no filtering effect.
 
         // Fase 4: shape / distort — AVAudioUnitDistortion wet mix
         // shape: gentle overdrive — softDistortion preset, x → wetDryMix (x*100)
@@ -530,6 +611,20 @@ public final class PatternScheduler {
             scheduleBuffer = bitcrushedBuffer(scheduleBuffer, bits: bits)
         }
 
+        // P0-3: per-event lpf/hpf biquad on sample buffer.
+        // Applied as buffer preprocessing (same pattern as crush). Params are constant
+        // for the entire buffer (event-level, not per-sample), which is correct and clean.
+        // room/delay are NOT applied here — they are orbit-bus effects (see P0-4).
+        // shape/vowel are still per-chain on the LayerGroup (last event wins).
+        let q = resonance ?? 0.707
+        if let fc = cutoff {
+            scheduleBuffer = lpfBuffer(scheduleBuffer, cutoffHz: fc, q: q)
+        }
+        if let fc = hpf {
+            // HPF: same biquad approach using hpfBuffer (reuse lpfBuffer with HPF coefs)
+            scheduleBuffer = hpfBufferApply(scheduleBuffer, cutoffHz: fc, q: q)
+        }
+
         // Fase 5: ADSR envelope over sample buffer (only when explicitly requested).
         // If attack/decay/sustain/release are all nil, this block is skipped entirely
         // — no change in sound for patterns that don't use ADSR (backward-compat).
@@ -554,19 +649,19 @@ public final class PatternScheduler {
 
     // MARK: - Synth dispatch
 
+    /// Dispatch a synth hap to the appropriate SynthLayer.
+    /// P0-3: lpf/hpf/resonance are per-event (passed to per-voice biquad).
+    /// P0-4: room/delay are NOT parameters here — they are applied to the orbit bus
+    ///       in scheduleWindow() before calling this function.
     private func dispatchSynthHap(
         synthName:    String,
         layerIdx:     Int,
         midiNote:     Double,
         gain:         Double,
-        room:         Double?,
         lpf:          Double?,
         hpf:          Double?,
         resonance:    Double?,
         pan:          Double?,
-        delay:        Double?,
-        delaytime:    Double?,
-        delayfeedback: Double?,
         attack:       Double,
         decay:        Double,
         sustain:      Double,
@@ -593,26 +688,27 @@ public final class PatternScheduler {
         let sampleRate = layer.sampleRate
         let freq = synthFrequency(midi: midiNote)
 
-        // Apply per-chain effects
-        if let r = room { layer.applyRoom(r) }
-        if let f = lpf  { layer.applyLPF(freq: f, resonance: resonance) }
-        if let f = hpf  { layer.applyHPF(freq: f, resonance: resonance) }
+        // P0-3: lpf/hpf/resonance are now per-event (per-voice biquad inside SynthVoice).
+        // We do NOT call layer.applyLPF/applyHPF any more — those set the AVAudioUnitEQ
+        // which is now permanently bypassed. Instead we pass the values directly to
+        // scheduleNote() → voice.trigger() so each voice has its own filter state.
+        // room/delay remain per-orbit (applied to the orbit bus, not here).
+        // pan is still per-event (AVAudioMixerNode, the last event wins per layer —
+        // this is acceptable since pan is set before scheduleBuffer for samples).
         if let p = pan  { layer.applyPan(p) }
-        if let d = delay {
-            layer.applyDelay(wet: d, time: delaytime, feedback: delayfeedback)
-        }
 
-        // Fase 4: shape / distort
+        // Fase 4: shape / distort (per-chain, last event wins)
         if let d = distort { layer.applyDistortion(d) }
         else if let s = shape { layer.applyDistortion(s) }
 
-        // Fase 4: vowel formant filter
+        // Fase 4: vowel formant filter (per-chain, last event wins)
         if let v = vowel { layer.applyVowel(v) }
 
         // Bug 2 fix: pass absoluteTime (host seconds) so the voice waits until
         // its exact scheduled frame before producing audio, eliminating the
         // up-to-lookahead (400ms) early onset that the old immediate-trigger had.
         // The render block derives the exact buffer frame from (absoluteTime - bufferStartSeconds).
+        // P0-3: pass lpf/hpf/resonance per event so each voice has independent filter state.
         layer.scheduleNote(
             freq:             freq,
             gain:             gain,
@@ -623,7 +719,10 @@ public final class PatternScheduler {
             durationSec:      durationSec,
             sampleRate:       sampleRate > 0 ? sampleRate : 44100.0,
             startHostSeconds: absoluteTime,
-            crushBits:        crush ?? 0.0
+            crushBits:        crush ?? 0.0,
+            lpfHz:            lpf,
+            hpfHz:            hpf,
+            resonanceQ:       resonance
         )
     }
 
@@ -631,9 +730,10 @@ public final class PatternScheduler {
 
     /// Build one SynthLayer per (layerIdx, synthName) pair.
     /// The chain key is "\(layerIdx)#\(synthName)" so each stack branch gets its
-    /// own voice pool, EQ, reverb, delay and panner.
-    private func buildSynthLayers(for pairs: Set<LayerNamePair>) {
-        let mainMixer  = audioEngine.mainMixerNode
+    /// own voice pool, EQ, distortion, vowelEQ and panner.
+    /// P0-4: panner connects to orbit gain node (not directly to mainMixer).
+    ///       room/delay are now on the orbit bus; SynthLayer.reverb/delay are not connected.
+    private func buildSynthLayers(for pairs: Set<LayerNamePair>, pairOrbit: [LayerNamePair: Int] = [:]) {
         let sampleRate = audioEngine.outputNode.outputFormat(forBus: 0).sampleRate
         let sr = sampleRate > 0 ? sampleRate : 44100.0
 
@@ -645,24 +745,45 @@ public final class PatternScheduler {
 
             audioEngine.attach(layer.sourceNode)
             audioEngine.attach(layer.eq)
-            audioEngine.attach(layer.reverb)
-            audioEngine.attach(layer.delay)
+            // P0-4: do not attach layer.reverb or layer.delay — they are on the orbit bus.
             audioEngine.attach(layer.distortion)
             audioEngine.attach(layer.vowelEQ)
             audioEngine.attach(layer.panner)
 
-            // Chain: sourceNode → EQ(lpf+hpf) → reverb → delay → distortion → vowelEQ → panner → mainMixer
+            // Chain: sourceNode → EQ(bypass, P0-3) → distortion → vowelEQ → panner → orbitBus.gain
+            // The EQ node is permanently bypassed (P0-3); it acts as a transparent pass-through.
+            // room/delay are on the orbit bus shared by all layers on the same orbit.
             audioEngine.connect(layer.sourceNode,  to: layer.eq,         format: nil)
-            audioEngine.connect(layer.eq,          to: layer.reverb,     format: nil)
-            audioEngine.connect(layer.reverb,      to: layer.delay,      format: nil)
-            audioEngine.connect(layer.delay,       to: layer.distortion, format: nil)
+            audioEngine.connect(layer.eq,          to: layer.distortion, format: nil)
             audioEngine.connect(layer.distortion,  to: layer.vowelEQ,    format: nil)
             audioEngine.connect(layer.vowelEQ,     to: layer.panner,     format: nil)
-            audioEngine.connect(layer.panner,      to: mainMixer,        format: nil)
+            let orbitIdx = pairOrbit[pair] ?? PatternScheduler.defaultOrbit
+            let orbitBus = buildOrbitBus(orbitIdx: orbitIdx)
+            audioEngine.connect(layer.panner, to: orbitBus.gain, format: nil)
 
             synthLayers[chainKey] = layer
-            print("[PatternScheduler] Built synth chain for: \(chainKey)")
+            print("[PatternScheduler] Built synth chain for: \(chainKey) → orbit \(orbitIdx)")
         }
+    }
+
+    // MARK: - Orbit bus construction (P0-4)
+
+    /// Get or create the orbit bus for a given orbit index.
+    /// Called from buildGroups/buildSynthLayers at play() time.
+    private func buildOrbitBus(orbitIdx: Int) -> OrbitBus {
+        if let existing = orbitBuses[orbitIdx] { return existing }
+        let mainMixer = audioEngine.mainMixerNode
+        let bus = OrbitBus(orbitIdx: orbitIdx)
+        audioEngine.attach(bus.gain)
+        audioEngine.attach(bus.reverb)
+        audioEngine.attach(bus.delay)
+        // Chain: orbit gain → orbit reverb → orbit delay → mainMixer
+        audioEngine.connect(bus.gain,   to: bus.reverb,   format: nil)
+        audioEngine.connect(bus.reverb, to: bus.delay,    format: nil)
+        audioEngine.connect(bus.delay,  to: mainMixer,    format: nil)
+        orbitBuses[orbitIdx] = bus
+        print("[PatternScheduler] Built orbit bus: \(orbitIdx)")
+        return bus
     }
 
     // MARK: - Group construction
@@ -671,8 +792,9 @@ public final class PatternScheduler {
     /// The chain key is "\(layerIdx)#\(sampleName)" — each stack branch gets its own
     /// player/varispeed/EQ/reverb/delay/panner chain.
     /// Buffers are still keyed by plain sampleName (deduplication — no memory waste).
-    private func buildGroups(for pairs: Set<LayerNamePair>) {
-        let mainMixer = audioEngine.mainMixerNode
+    /// P0-4: pairOrbit maps each pair to its orbit index; panner connects to orbit gain node.
+    private func buildGroups(for pairs: Set<LayerNamePair>, pairOrbit: [LayerNamePair: Int] = [:]) {
+        _ = audioEngine.mainMixerNode   // mainMixer now accessed via buildOrbitBus; kept here for clarity
 
         for pair in pairs {
             let chainKey = PatternScheduler.layerKey(layerIdx: pair.layerIdx, name: pair.name)
@@ -732,12 +854,18 @@ public final class PatternScheduler {
             // a canonicalFormat, y la conexión debe coincidir o scheduleBuffer lanza.
             audioEngine.connect(player,     to: varispeed,  format: Self.canonicalFormat)
             audioEngine.connect(varispeed,  to: eq,         format: nil)
-            audioEngine.connect(eq,         to: reverb,     format: nil)
-            audioEngine.connect(reverb,     to: delay,      format: nil)
-            audioEngine.connect(delay,      to: distortion, format: nil)
+            // P0-3: the EQ node is now a transparent pass-through (bands bypassed).
+            // Lowpass/highpass filtering for samples is done per-event as buffer preprocessing.
+            audioEngine.connect(eq,         to: distortion, format: nil)
             audioEngine.connect(distortion, to: vowelEQ,    format: nil)
             audioEngine.connect(vowelEQ,    to: panner,     format: nil)
-            audioEngine.connect(panner,     to: mainMixer,  format: nil)
+            // P0-4: connect panner to orbit gain node (not directly to mainMixer).
+            // room/delay are now on the orbit bus. The old per-layer reverb/delay nodes
+            // are removed from the chain; reverb and delay are AVAudioUnit vars on LayerGroup
+            // but not connected (kept for API compatibility — their wetDryMix stays 0).
+            let orbitIdx = pairOrbit[pair] ?? PatternScheduler.defaultOrbit
+            let orbitBus = buildOrbitBus(orbitIdx: orbitIdx)
+            audioEngine.connect(panner, to: orbitBus.gain, format: nil)
 
             let group = LayerGroup(
                 sampleName: name,

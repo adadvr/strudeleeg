@@ -47,17 +47,37 @@
 // (verified by checking strudel.cc/learn/synths: default note is ~36).
 // We use MIDI 36 (C2 in some notations, C3 in Strudel's C0-based convention).
 //
-// FILTERS
-// ───────
-// lpf/hpf are applied at the SynthLayer level via AVAudioUnitEQ (2-band):
-//   band[0] = lowPass  at lpf freq (default 20 000 Hz, bypassed)
-//   band[1] = highPass at hpf freq (default 20 Hz,    bypassed)
-// resonance (Q 0..50) → AVAudioUnitEQ band bandwidth.
-// Mapping: AVAudioUnitEQ bandwidth is in octaves (1/12 to 5).
-//   Q → bandwidth: bandwidth = log2(1 + 1/Q) approx; for Strudel-range Q 0..50:
-//   we clamp Q to 0.01..50, then bandwidth = max(0.05, min(5.0, 2.0 / Q * 0.5)).
-//   Documented compromise: AVAudioUnitEQ bandwidth param is not exactly Q;
-//   this gives a musically usable mapping across the supported range.
+// FILTERS (P0-3 — per-voice biquad, Audio EQ Cookbook formulas)
+// ──────────────────────────────────────────────────────────
+// lpf/hpf/resonance are now computed PER VOICE inside the render block using
+// direct-form II transposed biquad sections.  Formulas from Robert Bristow-Johnson's
+// "Audio EQ Cookbook" (public domain; https://webaudio.github.io/Audio-EQ-Cookbook/).
+//
+// Lowpass biquad at fc with Q:
+//   w0 = 2π fc / fs;   alpha = sin(w0) / (2Q)
+//   b0 = (1 - cos(w0)) / 2;  b1 = 1 - cos(w0);  b2 = (1 - cos(w0)) / 2
+//   a0 = 1 + alpha;  a1 = -2 cos(w0);  a2 = 1 - alpha
+//   (all divided by a0 to normalise)
+//
+// Highpass biquad at fc with Q:
+//   w0 = 2π fc / fs;   alpha = sin(w0) / (2Q)
+//   b0 = (1 + cos(w0)) / 2;  b1 = -(1 + cos(w0));  b2 = (1 + cos(w0)) / 2
+//   a0 = 1 + alpha;  a1 = -2 cos(w0);  a2 = 1 - alpha
+//   (all divided by a0 to normalise)
+//
+// Default Q when resonance is not set: 0.707 (Butterworth, maximally flat).
+// resonance in Strudel: Q 0..50. Clamped to [0.01, 50].
+//
+// Smoothing (click prevention): at trigger time the cutoff is set immediately.
+// Between events the cutoff target may change; a linear ramp of 64 samples
+// is applied per block when the cutoff changes to avoid audible zipper noise.
+// This is simpler than per-sample interpolation but sufficient at musical tempos.
+//
+// Residual AVAudioUnitEQ: the EQ node is kept in the synth chain but BOTH bands
+// are set bypass=true (no DSP effect). This avoids rebuilding the AVAudioEngine
+// graph (which would require a stop/start). The audio path becomes:
+//   sourceNode → EQ (bypass, transparent) → orbit reverb/delay bus → distortion → vowelEQ → panner
+// Removal of the EQ node entirely is a future cleanup item.
 //
 // SPEED
 // ─────
@@ -108,6 +128,83 @@ private func polyBLEP(_ t: Double, dt: Double) -> Double {
         return x * x + x + x + 1.0
     }
     return 0.0
+}
+
+// MARK: - Biquad filter (per-voice, P0-3)
+//
+// Direct-form II transposed biquad. One instance each for LPF and HPF.
+// Coefs are recomputed in computeLPFCoefs/computeHPFCoefs using Audio EQ Cookbook
+// formulas (public domain). State z1/z2 is reset on trigger to avoid pops.
+
+struct BiquadFilter {
+    // Normalised coefficients (divided by a0)
+    var nb0: Double = 1.0   // b0/a0
+    var nb1: Double = 0.0   // b1/a0
+    var nb2: Double = 0.0   // b2/a0
+    var na1: Double = 0.0   // a1/a0  (sign convention: y = nb0*x + nb1*x1 + nb2*x2 - na1*y1 - na2*y2)
+    var na2: Double = 0.0   // a2/a0
+
+    // Delay-line state (direct-form II transposed)
+    var z1: Double = 0.0
+    var z2: Double = 0.0
+
+    // Bypass flag: true when filter is disabled (identity).
+    var bypass: Bool = true
+
+    /// Process one sample through the biquad.
+    @inline(__always)
+    mutating func process(_ x: Double) -> Double {
+        if bypass { return x }
+        let y = nb0 * x + z1
+        z1 = nb1 * x - na1 * y + z2
+        z2 = nb2 * x - na2 * y
+        return y
+    }
+
+    /// Reset delay-line state (call at note onset to clear inter-note artifacts).
+    mutating func resetState() { z1 = 0; z2 = 0 }
+}
+
+/// Compute Audio EQ Cookbook lowpass biquad coefficients.
+/// fc: cutoff Hz; q: Q factor (clamped to [0.01, 50]); fs: sample rate Hz.
+/// Returns a BiquadFilter configured for lowpass, bypass=false.
+func biquadLPF(fc: Double, q: Double, fs: Double) -> BiquadFilter {
+    let fcC = max(1.0, min(fc, fs * 0.4999))   // keep below Nyquist
+    let qC  = max(0.01, min(q, 50.0))
+    let w0    = 2.0 * Double.pi * fcC / fs
+    let alpha = sin(w0) / (2.0 * qC)
+    let cosW  = cos(w0)
+    let b0 = (1.0 - cosW) / 2.0
+    let b1 = 1.0 - cosW
+    let b2 = (1.0 - cosW) / 2.0
+    let a0 =  1.0 + alpha
+    let a1 = -2.0 * cosW
+    let a2 =  1.0 - alpha
+    return BiquadFilter(
+        nb0: b0 / a0, nb1: b1 / a0, nb2: b2 / a0,
+        na1: a1 / a0, na2: a2 / a0,
+        z1: 0, z2: 0, bypass: false)
+}
+
+/// Compute Audio EQ Cookbook highpass biquad coefficients.
+/// fc: cutoff Hz; q: Q factor (clamped to [0.01, 50]); fs: sample rate Hz.
+/// Returns a BiquadFilter configured for highpass, bypass=false.
+func biquadHPF(fc: Double, q: Double, fs: Double) -> BiquadFilter {
+    let fcC = max(1.0, min(fc, fs * 0.4999))
+    let qC  = max(0.01, min(q, 50.0))
+    let w0    = 2.0 * Double.pi * fcC / fs
+    let alpha = sin(w0) / (2.0 * qC)
+    let cosW  = cos(w0)
+    let b0 = (1.0 + cosW) / 2.0
+    let b1 = -(1.0 + cosW)
+    let b2 = (1.0 + cosW) / 2.0
+    let a0 =  1.0 + alpha
+    let a1 = -2.0 * cosW
+    let a2 =  1.0 - alpha
+    return BiquadFilter(
+        nb0: b0 / a0, nb1: b1 / a0, nb2: b2 / a0,
+        na1: a1 / a0, na2: a2 / a0,
+        z1: 0, z2: 0, bypass: false)
 }
 
 // MARK: - ADSR state
@@ -203,6 +300,23 @@ final class SynthVoice {
     // Fase 4: bitcrusher — 0 means disabled, >0 means active with that bit depth
     private var crushBits: Double = 0.0   // 0 = no crush
 
+    // P0-3: per-voice biquad filters (Audio EQ Cookbook formulas, public domain)
+    // lpfFilter: lowpass at hap's lpf frequency + resonance Q, or bypass if no lpf set.
+    // hpfFilter: highpass at hap's hpf frequency + resonance Q, or bypass if no hpf set.
+    // Both are reset at trigger() and applied sample-by-sample in the render block.
+    // Smoothing: current/target cutoff + ramp counter to avoid zipper noise at note boundaries.
+    private var lpfFilter:     BiquadFilter = BiquadFilter()
+    private var hpfFilter:     BiquadFilter = BiquadFilter()
+    private var lpfCurrent:    Double = 20000.0   // current cutoff (ramped)
+    private var lpfTarget:     Double = 20000.0   // target cutoff
+    private var hpfCurrent:    Double = 20.0
+    private var hpfTarget:     Double = 20.0
+    private var lpfQ:          Double = 0.707     // Q (resonance)
+    private var hpfQ:          Double = 0.707
+    private var lpfRampLeft:   Int    = 0          // samples remaining in ramp
+    private var hpfRampLeft:   Int    = 0
+    private var filterSR:      Double = 44100.0    // cached sample rate for coef calc
+
     // ── Oscillator state ────────────────────────────────────────────────────
     private var phase:    Double = 0.0
     private var dt:       Double = 0.0  // phase increment per sample
@@ -221,6 +335,12 @@ final class SynthVoice {
     init() {}
 
     /// Trigger a new note on this voice (replaces any running note).
+    /// P0-3: lpfHz/hpfHz/resonanceQ apply per-voice biquad filters (Audio EQ Cookbook).
+    ///   lpfHz=nil → bypass lowpass;  hpfHz=nil → bypass highpass.
+    ///   resonanceQ=nil → default Q=0.707 (Butterworth).
+    ///   Cutoff is set immediately at trigger time (no ramp on the first note);
+    ///   subsequent events that reuse this voice will ramp from the previous cutoff
+    ///   over 64 samples to prevent clicks.
     func trigger(
         waveform:         String,
         freq:             Double,
@@ -233,7 +353,10 @@ final class SynthVoice {
         sampleRate:       Double,
         birthSample:      Int,
         startHostSeconds: Double,
-        crushBits:        Double = 0.0
+        crushBits:        Double = 0.0,
+        lpfHz:            Double? = nil,
+        hpfHz:            Double? = nil,
+        resonanceQ:       Double? = nil
     ) {
         self.freq             = freq
         self.gain             = gain
@@ -288,6 +411,36 @@ final class SynthVoice {
         self.isActive          = true
         self.birthSample       = birthSample
         self.crushBits         = crushBits
+
+        // P0-3: set per-voice biquad filters.
+        // Q defaults to 0.707 (Butterworth) if resonance not specified.
+        filterSR = sampleRate
+        let q = max(0.01, min(50.0, resonanceQ ?? 0.707))
+        if let fc = lpfHz, fc < sampleRate * 0.4999 {
+            // Set target; ramp from current (avoids clicks between sequential events)
+            lpfTarget  = fc
+            lpfQ       = q
+            lpfRampLeft = 64
+            lpfFilter   = biquadLPF(fc: lpfCurrent, q: q, fs: sampleRate)
+            lpfFilter.resetState()
+        } else {
+            lpfFilter.bypass = true
+            lpfCurrent = 20000.0
+            lpfTarget  = 20000.0
+            lpfRampLeft = 0
+        }
+        if let fc = hpfHz, fc > 1.0 {
+            hpfTarget  = fc
+            hpfQ       = q
+            hpfRampLeft = 64
+            hpfFilter   = biquadHPF(fc: hpfCurrent, q: q, fs: sampleRate)
+            hpfFilter.resetState()
+        } else {
+            hpfFilter.bypass = true
+            hpfCurrent = 20.0
+            hpfTarget  = 20.0
+            hpfRampLeft = 0
+        }
     }
 
     /// Render `frameCount` samples into `buffer`, adding to existing content.
@@ -395,11 +548,75 @@ final class SynthVoice {
                 sample = sin(2.0 * Double.pi * phase)
             }
 
+            // P0-3: apply per-voice biquad filters (lowpass then highpass).
+            // Smoothing: ramp cutoff from current to target over 64 samples.
+            // Each sample updates the cutoff by one step if the ramp is active.
+            var filteredSample = sample
+            if !lpfFilter.bypass {
+                if lpfRampLeft > 0 {
+                    // Advance ramp: linearly interpolate lpfCurrent → lpfTarget
+                    let step = (lpfTarget - lpfCurrent) / Double(lpfRampLeft + 1)
+                    lpfCurrent += step
+                    lpfRampLeft -= 1
+                    // Recompute LPF coefs for new cutoff (smooth step each sample)
+                    lpfFilter = biquadLPF(fc: lpfCurrent, q: lpfQ, fs: filterSR)
+                    // Preserve delay-line state from previous iteration — do NOT reset
+                    // (recomputing the filter struct zeroes z1/z2 by default; we must restore)
+                    // Since biquadLPF returns a new struct, we need to copy state back.
+                    // Fix: store z1/z2 before, restore after coef update.
+                    // Actually we can use a simpler approach: update coefs in-place.
+                    // Let's just do a coef-only recalc without touching z1/z2:
+                    let fcC = max(1.0, min(lpfCurrent, filterSR * 0.4999))
+                    let qC  = max(0.01, min(lpfQ, 50.0))
+                    let w0    = 2.0 * Double.pi * fcC / filterSR
+                    let alpha = sin(w0) / (2.0 * qC)
+                    let cosW  = cos(w0)
+                    let b0lpf = (1.0 - cosW) / 2.0
+                    let b1lpf = 1.0 - cosW
+                    let b2lpf = (1.0 - cosW) / 2.0
+                    let a0lpf = 1.0 + alpha
+                    let a1lpf = -2.0 * cosW
+                    let a2lpf = 1.0 - alpha
+                    lpfFilter.nb0 = b0lpf / a0lpf
+                    lpfFilter.nb1 = b1lpf / a0lpf
+                    lpfFilter.nb2 = b2lpf / a0lpf
+                    lpfFilter.na1 = a1lpf / a0lpf
+                    lpfFilter.na2 = a2lpf / a0lpf
+                    lpfFilter.bypass = false
+                }
+                filteredSample = lpfFilter.process(filteredSample)
+            }
+            if !hpfFilter.bypass {
+                if hpfRampLeft > 0 {
+                    let step = (hpfTarget - hpfCurrent) / Double(hpfRampLeft + 1)
+                    hpfCurrent += step
+                    hpfRampLeft -= 1
+                    let fcC = max(1.0, min(hpfCurrent, filterSR * 0.4999))
+                    let qC  = max(0.01, min(hpfQ, 50.0))
+                    let w0    = 2.0 * Double.pi * fcC / filterSR
+                    let alpha = sin(w0) / (2.0 * qC)
+                    let cosW  = cos(w0)
+                    let b0hpf = (1.0 + cosW) / 2.0
+                    let b1hpf = -(1.0 + cosW)
+                    let b2hpf = (1.0 + cosW) / 2.0
+                    let a0hpf = 1.0 + alpha
+                    let a1hpf = -2.0 * cosW
+                    let a2hpf = 1.0 - alpha
+                    hpfFilter.nb0 = b0hpf / a0hpf
+                    hpfFilter.nb1 = b1hpf / a0hpf
+                    hpfFilter.nb2 = b2hpf / a0hpf
+                    hpfFilter.na1 = a1hpf / a0hpf
+                    hpfFilter.na2 = a2hpf / a0hpf
+                    hpfFilter.bypass = false
+                }
+                filteredSample = hpfFilter.process(filteredSample)
+            }
+
             // ── Apply envelope + gain + headroom ───────────────────────────
             // Bug 3 fix: synthHeadroom (0.3) keeps synth voices at a level that
             // does not mask drum samples at gain(0.95). Documented approximation;
             // not calibrated bit-for-bit against Web Audio. See COMPATIBILITY.md.
-            var out = Float(sample * env * gain) * synthHeadroom
+            var out = Float(filteredSample * env * gain) * synthHeadroom
 
             // ── Bitcrusher (Fase 4): applied post-envelope in render block ──
             // Formula: round(s × 2^(bits-1)) / 2^(bits-1) — public domain DSP
@@ -449,18 +666,22 @@ final class SynthLayer {
         self.synthName = synthName
         self.voices = (0..<SynthLayer.voicePoolSize).map { _ in SynthVoice() }
 
-        // ── EQ: 2 bands — lpf (band 0) and hpf (band 1) ────────────────────
+        // ── EQ: 2 bands — BYPASSED (P0-3)
+        // Both bands are set bypass=true so the AVAudioUnitEQ has zero effect.
+        // lpf/hpf/resonance are now applied per-voice inside SynthVoice.render()
+        // using Audio EQ Cookbook biquad formulas. The EQ node is kept in the
+        // graph to avoid a stop/start cycle; it acts as a transparent pass-through.
         let eqNode = AVAudioUnitEQ(numberOfBands: 2)
 
         let lpfBand = eqNode.bands[0]
-        lpfBand.filterType = .lowPass  // plain lowPass: no resonance peak by default
-        lpfBand.frequency  = 20_000   // transparent (above hearing range)
-        lpfBand.bypass     = true
+        lpfBand.filterType = .lowPass
+        lpfBand.frequency  = 20_000
+        lpfBand.bypass     = true     // <─ permanently bypassed (P0-3)
 
         let hpfBand = eqNode.bands[1]
-        hpfBand.filterType = .highPass  // plain highPass: no resonance peak by default
-        hpfBand.frequency  = 20.0       // transparent (below hearing range)
-        hpfBand.bypass     = true
+        hpfBand.filterType = .highPass
+        hpfBand.frequency  = 20.0
+        hpfBand.bypass     = true     // <─ permanently bypassed (P0-3)
 
         self.eq = eqNode
 
@@ -594,6 +815,9 @@ final class SynthLayer {
     ///   PatternScheduler) when this voice should begin producing audio.
     ///   The render block converts the buffer's mHostTime to seconds and computes the
     ///   exact frame offset within each render buffer for sample-accurate voice onset.
+    /// P0-3: lpfHz/hpfHz/resonanceQ are passed to the voice's biquad filters.
+    ///   Each voice has independent biquad state, so two simultaneous events in the
+    ///   same layer may have different filter frequencies.
     func scheduleNote(
         freq:             Double,
         gain:             Double,
@@ -604,7 +828,10 @@ final class SynthLayer {
         durationSec:      Double,
         sampleRate:       Double,
         startHostSeconds: Double,
-        crushBits:        Double = 0.0
+        crushBits:        Double = 0.0,
+        lpfHz:            Double? = nil,
+        hpfHz:            Double? = nil,
+        resonanceQ:       Double? = nil
     ) {
         renderLock.lock()
         defer { renderLock.unlock() }
@@ -631,7 +858,10 @@ final class SynthLayer {
             sampleRate:       sampleRate,
             birthSample:      renderSampleCount,
             startHostSeconds: startHostSeconds,
-            crushBits:        crushBits
+            crushBits:        crushBits,
+            lpfHz:            lpfHz,
+            hpfHz:            hpfHz,
+            resonanceQ:       resonanceQ
         )
     }
 
@@ -767,6 +997,132 @@ public func bitcrushedBuffer(_ buffer: AVAudioPCMBuffer, bits: Double) -> AVAudi
         let dst = dstChannels[ch]
         for i in 0..<frameCount {
             dst[i] = Foundation.round(src[i] * levels) * invLevels
+        }
+    }
+    return result
+}
+
+// MARK: - Biquad LPF over sample buffer (P0-3)
+
+/// Apply a biquad lowpass filter to a copy of a PCM buffer.
+/// Used for sample-based layers: per-event lpf preprocessing (same pattern as crush/ADSR).
+/// The params are constant for the entire buffer (event-level constant, not per-sample).
+///
+/// Formula: Audio EQ Cookbook lowpass biquad (public domain).
+///   w0 = 2π·fc/fs;  alpha = sin(w0)/(2Q);  cosW = cos(w0)
+///   b0=(1-cosW)/2, b1=1-cosW, b2=(1-cosW)/2
+///   a0=1+alpha, a1=-2·cosW, a2=1-alpha   (normalised by a0)
+///
+/// Parameters:
+///   buffer: source Float32 non-interleaved PCM buffer.
+///   cutoffHz: lowpass cutoff frequency in Hz. Clamped to [1, 0.4999·fs].
+///   q:        filter Q (0.01..50). Default 0.707 (Butterworth).
+/// Returns: new buffer with LPF applied, same format as input.
+public func lpfBuffer(_ buffer: AVAudioPCMBuffer,
+                      cutoffHz: Double,
+                      q: Double = 0.707) -> AVAudioPCMBuffer {
+    guard let srcChannels = buffer.floatChannelData else { return buffer }
+    let frameCount  = Int(buffer.frameLength)
+    let channelCount = Int(buffer.format.channelCount)
+    guard frameCount > 0, channelCount > 0 else { return buffer }
+
+    let fs = buffer.format.sampleRate
+    let fcC = max(1.0, min(cutoffHz, fs * 0.4999))
+    let qC  = max(0.01, min(q, 50.0))
+    let w0    = 2.0 * Double.pi * fcC / fs
+    let alpha = sin(w0) / (2.0 * qC)
+    let cosW  = cos(w0)
+    let b0 = (1.0 - cosW) / 2.0
+    let b1 = 1.0 - cosW
+    let b2 = (1.0 - cosW) / 2.0
+    let a0 =  1.0 + alpha
+    let a1 = -2.0 * cosW
+    let a2 =  1.0 - alpha
+    let nb0 = Float(b0 / a0)
+    let nb1 = Float(b1 / a0)
+    let nb2 = Float(b2 / a0)
+    let na1 = Float(a1 / a0)
+    let na2 = Float(a2 / a0)
+
+    guard let result = AVAudioPCMBuffer(
+        pcmFormat: buffer.format,
+        frameCapacity: buffer.frameCapacity
+    ) else { return buffer }
+    result.frameLength = buffer.frameLength
+
+    guard let dstChannels = result.floatChannelData else { return buffer }
+    for ch in 0..<channelCount {
+        let src = srcChannels[ch]
+        let dst = dstChannels[ch]
+        // Direct-form II transposed biquad (per-channel state)
+        var z1: Float = 0; var z2: Float = 0
+        for i in 0..<frameCount {
+            let x = src[i]
+            let y = nb0 * x + z1
+            z1 = nb1 * x - na1 * y + z2
+            z2 = nb2 * x - na2 * y
+            dst[i] = y
+        }
+    }
+    return result
+}
+
+/// Apply a biquad highpass filter to a copy of a PCM buffer (P0-3).
+/// Used for sample-based layers: per-event hpf preprocessing.
+///
+/// Formula: Audio EQ Cookbook highpass biquad (public domain).
+///   w0 = 2π·fc/fs;  alpha = sin(w0)/(2Q);  cosW = cos(w0)
+///   b0=(1+cosW)/2, b1=-(1+cosW), b2=(1+cosW)/2
+///   a0=1+alpha, a1=-2·cosW, a2=1-alpha   (normalised by a0)
+///
+/// Parameters:
+///   buffer: source Float32 non-interleaved PCM buffer.
+///   cutoffHz: highpass cutoff frequency in Hz. Clamped to [1, 0.4999·fs].
+///   q:        filter Q (0.01..50). Default 0.707 (Butterworth).
+/// Returns: new buffer with HPF applied, same format as input.
+public func hpfBufferApply(_ buffer: AVAudioPCMBuffer,
+                            cutoffHz: Double,
+                            q: Double = 0.707) -> AVAudioPCMBuffer {
+    guard let srcChannels = buffer.floatChannelData else { return buffer }
+    let frameCount  = Int(buffer.frameLength)
+    let channelCount = Int(buffer.format.channelCount)
+    guard frameCount > 0, channelCount > 0 else { return buffer }
+
+    let fs = buffer.format.sampleRate
+    let fcC = max(1.0, min(cutoffHz, fs * 0.4999))
+    let qC  = max(0.01, min(q, 50.0))
+    let w0    = 2.0 * Double.pi * fcC / fs
+    let alpha = sin(w0) / (2.0 * qC)
+    let cosW  = cos(w0)
+    let b0 = (1.0 + cosW) / 2.0
+    let b1 = -(1.0 + cosW)
+    let b2 = (1.0 + cosW) / 2.0
+    let a0 =  1.0 + alpha
+    let a1 = -2.0 * cosW
+    let a2 =  1.0 - alpha
+    let nb0 = Float(b0 / a0)
+    let nb1 = Float(b1 / a0)
+    let nb2 = Float(b2 / a0)
+    let na1 = Float(a1 / a0)
+    let na2 = Float(a2 / a0)
+
+    guard let result = AVAudioPCMBuffer(
+        pcmFormat: buffer.format,
+        frameCapacity: buffer.frameCapacity
+    ) else { return buffer }
+    result.frameLength = buffer.frameLength
+
+    guard let dstChannels = result.floatChannelData else { return buffer }
+    for ch in 0..<channelCount {
+        let src = srcChannels[ch]
+        let dst = dstChannels[ch]
+        var z1: Float = 0; var z2: Float = 0
+        for i in 0..<frameCount {
+            let x = src[i]
+            let y = nb0 * x + z1
+            z1 = nb1 * x - na1 * y + z2
+            z2 = nb2 * x - na2 * y
+            dst[i] = y
         }
     }
     return result

@@ -43,9 +43,9 @@ Living document: function → status → equivalence notes.
 | `decay(s)` | ✅ nativo (Fase 3) | ADSR decay in seconds. Default: 0.05s. Patroneable |
 | `sustain(0..1)` | ✅ nativo (Fase 3) | ADSR sustain level 0..1. Default: 0.6. Patroneable |
 | `release(s)` | ✅ nativo (Fase 3) | ADSR release in seconds. Default: 0.1s (Strudel docs). Patroneable |
-| `lpf(hz)` | ✅ nativo (Fase 3) | Low-pass filter frequency (Hz). Alias for `cutoff` on synth chain. AVAudioUnitEQ band[0] lowPass. Patroneable |
-| `hpf(hz)` | ✅ nativo (Fase 3) | High-pass filter frequency (Hz). AVAudioUnitEQ band[1] highPass. Patroneable |
-| `resonance(q)` | ✅ nativo (Fase 3) | Filter Q (0..50 per Strudel docs). Mapped to AVAudioUnitEQ bandwidth in octaves: `bandwidth = clamp(2.0/max(0.01,Q), 0.05, 5.0)`. Applies to both lpf and hpf bands. See resonance mapping note below |
+| `lpf(hz)` | ✅ nativo (Fase 3 → P0-3) | Low-pass filter frequency (Hz). **Synths: per-voice biquad LPF** (Audio EQ Cookbook direct-form II transposed, 2nd-order Butterworth Q=0.707, 64-sample onset ramp). **Samples: per-event buffer preprocessing** (biquad applied to PCM copy). Two simultaneous voices can have different lpf. AVAudioUnitEQ kept in graph but permanently bypassed. Patroneable |
+| `hpf(hz)` | ✅ nativo (Fase 3 → P0-3) | High-pass filter frequency (Hz). **Synths: per-voice biquad HPF** (same formulas, HPF variant). **Samples: per-event buffer preprocessing**. Patroneable |
+| `resonance(q)` | ✅ nativo (Fase 3 → P0-3) | Filter Q (0..50 per Strudel docs). Applied to per-voice biquad (synths) and per-event buffer biquad (samples). Default Q=0.707 (Butterworth — maximally flat). Range clamped to [0.01, 50]. |
 | `speed(x)` | ✅ nativo (Fase 3) | Sample playback speed (1=normal, 2=double speed +1 octave, 0.5=half). Multiplied with note-based varispeed rate. Negative speed: not supported (documented). For synths: speed() applies to pattern level only (frequency computed from MIDI directly). Patroneable |
 | `shape(x)` | ✅ nativo (Fase 4) | Soft saturation 0..1. AVAudioUnitDistortion, preset `.multiDistortedFunk` (warm overdrive). x → wetDryMix (x×100). Per-chain compromise. Patroneable |
 | `distort(x)` | ✅ nativo (Fase 4) | Same DSP path as shape (same preset). Strudel uses different curves; here both use the same preset but are separate controllable parameters. Documented approximation |
@@ -75,6 +75,7 @@ Living document: function → status → equivalence notes.
 | `sus(x)` | ✅ nativo (Fase 5) | Alias for `sustain(x)`. |
 | `rel(x)` | ✅ nativo (Fase 5) | Alias for `release(x)`. |
 | ADSR on samples | ✅ nativo (Fase 5) | ADSR envelope applied to sample PCM buffers when any of attack/decay/sustain/release is explicitly set. Pre-processed per event (same pattern as crush). If no ADSR param is set → buffer unchanged (backward-compat). |
+| `orbit(n)` | ✅ nativo (P0-4) | Route layer to a named effect bus (integer ≥ 1). Default: orbit=1. Each orbit has its own AVAudioMixerNode (gain/duck prep) → AVAudioUnitReverb → AVAudioUnitDelay → mainMixer. Multiple layers on the same orbit share the reverb tail (same as Strudel). room/delay params updated from last event on that orbit (see orbit bus compromise below). Patternable. |
 | `$:` | ✅ nativo (Fase 5) | Top-level parallel patterns. Each line starting with `$:` defines one pattern; they are stacked implicitly. `_$:` (muted) lines are ignored. Multi-line patterns: body continues until next `$:` / `_$:` line. Limitation: continuation lines must not start with `$:` or `_$:`. |
 | Leading-dot numbers | ✅ nativo (Fase 5) | `.4` accepted everywhere as `0.4` (affects all numeric method args in CodeParser). |
 
@@ -118,51 +119,56 @@ Supported scale names (case-insensitive):
 
 Format: `"Root:name"` where Root = C, C#, Db, D, D#, Eb, E, F, F#, Gb, G, G#, Ab, A, A#, Bb, B.
 
-## Audio chain (per sample layer)
+## Audio chain (per sample layer) — updated P0-4
 
 ```
-AVAudioPlayerNode → AVAudioUnitVarispeed → AVAudioUnitEQ (lowpass)
-  → AVAudioUnitReverb (room) → AVAudioUnitDelay (delay)
-  → AVAudioMixerNode (pan) → mainMixer
-```
-
-`delay` node is always in chain but wet=0 (dry) unless `.delay()` called.
-`pan` node always in chain at center (0) unless `.pan()` called.
-
-## Audio chain (per synth layer — Fase 3)
-
-```
-AVAudioSourceNode (voice pool, 8 voices)
-  → AVAudioUnitEQ (band[0]=lowPass lpf, band[1]=highPass hpf)
-  → AVAudioUnitReverb (room)
-  → AVAudioUnitDelay (delay)
+AVAudioPlayerNode → AVAudioUnitVarispeed → AVAudioUnitEQ (lowpass, bypassed)
   → AVAudioMixerNode (pan)
+  → OrbitBus.gain (AVAudioMixerNode) → OrbitBus.reverb → OrbitBus.delay
+  → mainMixer
+```
+
+`pan` node always in chain at center (0) unless `.pan()` called.
+Reverb/delay are on the shared orbit bus (not per-layer). Each orbit gets one bus.
+Per-event lpf/hpf (samples): applied as buffer preprocessing before scheduling (biquad, Audio EQ Cookbook).
+
+## Audio chain (per synth layer) — updated P0-3/P0-4
+
+```
+AVAudioSourceNode (voice pool, 8 voices, per-voice biquad LPF/HPF inside render block)
+  → AVAudioUnitEQ (bypass=true, kept in graph for topology stability)
+  → AVAudioUnitDistortion (shape/distort)
+  → AVAudioUnitEQ/3bands (vowel formant)
+  → AVAudioMixerNode (pan)
+  → OrbitBus.gain (AVAudioMixerNode) → OrbitBus.reverb → OrbitBus.delay
   → mainMixer
 ```
 
 - Polyphony: 8-voice pool per synth type. Voice steal: LRU (oldest birth).
-- Both EQ bands are bypassed by default; activated when lpf/hpf called.
+- AVAudioUnitEQ bands permanently bypassed (bypass=true); biquad LPF/HPF is per-voice inside the render block.
+- **Per-voice biquad (P0-3)**: BiquadFilter struct (direct-form II transposed). Coefficients from Audio EQ Cookbook (Robert Bristow-Johnson, public domain). 64-sample linear ramp on cutoff changes to avoid clicks (coefficients recomputed inline without resetting z1/z2 delay lines). Two simultaneous events with different lpf → independent filter state per voice.
 - ADSR envelope is computed per-voice in the render block (no Apple AU needed for envelope).
 - **Sample-accurate onset (Bug 2 fix)**: Each voice stores its scheduled `startHostSeconds` (absolute host-clock time, same domain as `mach_absolute_time`). The AVAudioSourceNode render block reads `AudioTimeStamp.mHostTime` of frame 0, converts to seconds, and computes `startFrame = Int((startHostSeconds − bufferStart) × sampleRate)`. The voice renders silence for frames 0..<startFrame and audio from startFrame onward — eliminating the pre-fix up-to-lookahead (400ms) early triggering.
 - **Synth headroom (Bug 3 fix, empirically calibrated 2026-07-23)**: A fixed factor `synthHeadroom = 0.3` is applied in the render block (`sample × gain × 0.3`). This factor was empirically validated against Strudel's real output using `WebProbe --record` (WKUserScript monkey-patch, ScriptProcessorNode capture). See [Volume Calibration](#volume-calibration-2026-07-23) below.
 - **Triangle waveform amplitude fix (2026-07-23)**: The triDrive formula for the leaky integrator was corrected from `k=(1−L)/(1−Lpow)` to `k=(1−L)×(1+Lpow)/(1−Lpow)`. The original formula ignored the cross-half residue and produced steady-state peaks at ~0.51 instead of 1.0, making triangle ~50% too quiet. The corrected formula gives peak=1.0 at all frequencies. See `SynthVoice.swift trigger()` for derivation.
 
-## Resonance mapping note (Fase 3)
+## Resonance note (updated P0-3)
 
 `resonance` in Strudel is a filter Q parameter (range 0..50 per public docs).
-AVAudioUnitEQ uses bandwidth in octaves (not Q directly).
 
-Mapping used: `bandwidth = clamp(2.0 / max(0.01, Q), 0.05, 5.0)`
+**P0-3 (synths / sample biquad):** Q is passed directly to the Audio EQ Cookbook biquad formula:
+`alpha = sin(w0) / (2 × Q)`, where `w0 = 2π × fc / fs`. Q is clamped to [0.01, 50].
+Default Q = 0.707 (Butterworth — maximally flat passband).
 
-| Q | bandwidth (octaves) | Character |
-|---|---|---|
-| 0 | 5.0 | Wide, no resonance |
-| 1 | 2.0 | Gentle |
-| 5 | 0.4 | Moderate resonance |
-| 10 | 0.2 | Strong |
-| 50 | 0.05 | Very sharp (minimum bandwidth) |
+| Q | Character |
+|---|---|
+| 0.707 | Butterworth (default, maximally flat) |
+| 1 | Slightly peaked |
+| 5 | Noticeable resonance peak |
+| 10 | Strong self-oscillation tendency |
+| 50 | Very sharp (near self-oscillation) |
 
-This is a practical approximation; exact Q-to-bandwidth conversion depends on AVAudioUnitEQ's internal implementation (Apple private). Documented compromise.
+The old AVAudioUnitEQ bandwidth mapping (`bandwidth = clamp(2.0/Q, 0.05, 5.0)`) is no longer used for synths or samples; the EQ node is permanently bypassed in both chains.
 
 ## Synth oscillators (Fase 3)
 
@@ -181,28 +187,29 @@ All oscillators are band-limited using polyBLEP corrections (standard public-dom
 |---|---|---|
 | Negative `speed()` (reverse) | Not supported | Documented. `scheduleSegment` reverse is complex to implement correctly for arbitrary buffers. Document for Fase 4 if needed. |
 | `speed()` affecting synth frequency | Not applicable | Synth frequency is computed from MIDI note; speed() is pattern-level only for synths |
-| Per-event room/cutoff/lpf/hpf/resonance | Per-chain compromise | Same as Fase 1. Node-global parameters updated at dispatch time — events alternating filter values in the same layer share the last-set value |
+| Per-event lpf/hpf/resonance | ✅ Resolved in P0-3 | Synths: per-voice biquad (Audio EQ Cookbook). Samples: per-event buffer preprocessing. |
+| Per-event room/delay | Orbit-bus compromise | room/delay are per orbit bus — last event on that orbit wins. Better than per-chain (same orbit shares reverb tail as in Strudel); room/delay cannot differ within the same orbit. |
 | Offline filter audio test | Not tested | AVAudioUnitEQ requires a running engine. Parameter mapping is unit-tested. Actual DSP filter roll-off trusted to Apple |
 
 ---
 
 ## Fase 4: DSP / Textures
 
-### Audio chain (Fase 4 — updated)
+### Audio chain (Fase 4 — updated for P0-3/P0-4)
 
 ```
-Sample: AVAudioPlayerNode → AVAudioUnitVarispeed → AVAudioUnitEQ (lowpass)
-  → AVAudioUnitReverb (room) → AVAudioUnitDelay (delay)
+Sample: AVAudioPlayerNode → AVAudioUnitVarispeed → AVAudioUnitEQ (bypassed)
   → AVAudioUnitDistortion (shape/distort, dry default)
   → AVAudioUnitEQ/3bands (vowel formant, bypassed default)
-  → AVAudioMixerNode (pan) → mainMixer
+  → AVAudioMixerNode (pan)
+  → OrbitBus.gain → OrbitBus.reverb → OrbitBus.delay → mainMixer
 
-Synth: AVAudioSourceNode (voice pool)
-  → AVAudioUnitEQ (lpf+hpf)
-  → AVAudioUnitReverb → AVAudioUnitDelay
+Synth: AVAudioSourceNode (voice pool, per-voice biquad LPF/HPF)
+  → AVAudioUnitEQ (bypass=true)
   → AVAudioUnitDistortion (shape/distort)
   → AVAudioUnitEQ/3bands (vowel)
-  → AVAudioMixerNode (pan) → mainMixer
+  → AVAudioMixerNode (pan)
+  → OrbitBus.gain → OrbitBus.reverb → OrbitBus.delay → mainMixer
 ```
 
 ### shape / distort (saturation)
@@ -279,8 +286,9 @@ Both are documented in COMPATIBILITY.md (this file) with the rationale above.
 |---|---|---|
 | `chorus` | Not implemented | See chorus/phaser note above |
 | `phaser` | Not implemented | See chorus/phaser note above |
-| Per-event shape/distort (unique per event in same layer) | Per-chain compromise | Last-set value wins. Same limitation as lpf/room |
+| Per-event shape/distort (unique per event in same layer) | Per-chain compromise | Last-set value wins per layer. lpf/hpf are now per-event (P0-3); shape/distort remain per-chain |
 | Per-event vowel (unique per event in same layer) | Per-chain compromise | All events in the same layer see the last-set vowel |
+| Per-orbit room/delay uniqueness | Orbit-bus compromise | All layers on the same orbit share one reverb+delay bus; room/delay params set by last event dispatched on that orbit |
 | `chop`/`striate` on synths | Pattern-level only | begin/end fields are ignored in the synth scheduler path (synth sound is generated; no sample buffer to segment) |
 | Offline distortion/vowel audio test | Not tested offline | AVAudioUnit DSP requires a running engine. Parameter mappings (wetDryMix, band frequencies) are unit-tested |
 
@@ -432,7 +440,7 @@ En el editor se usan los osciladores nombrados (`sine`, `saw`, etc.).
 
 El valor de un control modulated por señal (e.g. `.lpf(sine.range(200,2000))`) se evalúa UNA VEZ por evento, en `whole.begin`. Dentro del evento, el valor es constante (no hay interpolación per-sample).
 
-La interpolación continua por-sample (suavidad real entre eventos) llega con P0-3 (efectos por evento). Hasta entonces: control por evento, sin audible zipper noise a tempo musical razonable.
+La interpolación continua por-sample (suavidad real entre eventos) está parcialmente resuelta con P0-3: los biquads de synth tienen rampa de 64 muestras en el cutoff. Para otros parámetros (gain, pan, room) el valor se evalúa una vez por evento.
 
 ### Estado EEG hook
 
@@ -446,3 +454,100 @@ let modulatedPattern = codePattern.lpf(alphaSignal.range(200, 2000))
 ```
 
 La integración completa del ciclo EEG→audio (scheduling continuo de señal) requiere que el scheduler consulte la señal en cada buffer de audio (P0-3+). La infraestructura de patrones está lista.
+
+---
+
+## P0-3: Efectos por evento (2026-07-23)
+
+### Cambio arquitectónico
+
+Se elimina el "per-chain compromise" para lpf/hpf/resonance:
+
+| Componente | Antes | Ahora |
+|---|---|---|
+| Synth lpf/hpf | AVAudioUnitEQ per-layer (último evento wins) | Biquad per-voice (independiente por voz) |
+| Sample lpf/hpf | AVAudioUnitEQ per-layer (último evento wins) | Buffer preprocessing per-event (copia biquadificada) |
+| resonance (Q) | Bandwidth octaves en AVAudioUnitEQ | Q directo al biquad (fórmula Audio EQ Cookbook) |
+| room/delay | AVAudioUnitReverb/Delay per-layer | Orbit bus compartido por orbita (ver P0-4) |
+
+### Biquad: Audio EQ Cookbook (dominio público)
+
+Implementación: direct-form II transposed, single-precision accumulation in Double.
+
+**Lowpass:**
+```
+w0 = 2π × fc / fs
+alpha = sin(w0) / (2Q)
+b0 = (1 − cos(w0)) / 2,  b1 = 1 − cos(w0),  b2 = (1 − cos(w0)) / 2
+a0 = 1 + alpha,  a1 = −2 cos(w0),  a2 = 1 − alpha
+H_norm: divide all by a0
+```
+
+**Highpass:**
+```
+b0 = (1 + cos(w0)) / 2,  b1 = −(1 + cos(w0)),  b2 = (1 + cos(w0)) / 2
+a coefficients: same as lowpass
+```
+
+Default Q = 0.707 (Butterworth). fc clamped to [1, fs×0.4999]. Q clamped to [0.01, 50].
+
+### 64-sample ramp (anti-click)
+
+On voice trigger: `lpfCurrent` = last cutoff, `lpfTarget` = new cutoff, `lpfRampLeft = 64`.
+In the render block, for each of the 64 ramp samples: cutoff = current + (target-current) × (64-rampLeft)/64,
+coefficients recomputed inline, biquad state z1/z2 preserved (not reset). After ramp: stable at target.
+On hard retrigger: z1/z2 reset to avoid state accumulation from previous note.
+
+### Samples: buffer preprocessing
+
+`lpfBuffer(_ buffer: AVAudioPCMBuffer, cutoffHz: Double, q: Double) -> AVAudioPCMBuffer`
+`hpfBufferApply(_ buffer: AVAudioPCMBuffer, cutoffHz: Double, q: Double) -> AVAudioPCMBuffer`
+
+Applied in `dispatchHap()` before scheduling. Same biquad formulas. Q from resonance field (default 0.707).
+Parameters are constant per event (no ramp needed for buffer-mode).
+
+### AudioValidate: T10 (per-voice biquad)
+
+Test T10 added to `Sources/AudioValidate/main.swift`:
+- T10a: `note("a3").sound("sawtooth").lpf(200)` → fundamental 220 Hz detected in OfflineVoice output
+- T10b: same → energy band 800-8000 Hz attenuated ≥ -20 dB (actual: ~-25 dB, well below -24 dB theoretical)
+
+`OfflineVoicePool` updated: `OVBiquadFilter` struct + `lpfHz` threading through `PendingEvent` → `OfflineVoice.trigger()` → render loop.
+
+Total AudioValidate: **24/24 PASS** (22 original + T10a + T10b).
+
+---
+
+## P0-4: orbit(n) — Buses de efectos por órbita (2026-07-23)
+
+### Semántica
+
+`.orbit(n)` rutas una capa a un bus de efectos independiente. Default: orbit=1.
+Múltiples capas en la misma órbita comparten reverb+delay (mismo comportamiento que Strudel).
+
+### Implementación: OrbitBus
+
+```swift
+final class OrbitBus {
+    let gain: AVAudioMixerNode     // duck target para P1-5
+    let reverb: AVAudioUnitReverb  // room → wetDryMix = room × 100
+    let delay: AVAudioUnitDelay    // delay wet/time/feedback
+}
+```
+
+Cadena: `panner → OrbitBus.gain → OrbitBus.reverb → OrbitBus.delay → mainMixer`
+
+Buses creados on-demand en `play()` (pre-scan de orbits). Destruidos en `stop()` (detach + removeFromEngine).
+
+### Compromiso documentado (orbit bus)
+
+- room y delay params: actualizados por el último evento despachado en esa órbita.
+- Mejor que per-chain (antes): todas las capas de la misma órbita comparten el mismo tail de reverb (correcto, igual que Strudel).
+- Peor que per-event: dos eventos en la misma órbita con room distinto usan el valor del último. Documentado.
+- room/delay NO son per-event para samples (la infraestructura de preprocessing de buffer puede extenderse en el futuro si se requiere).
+
+### CodeParser / ControlPattern
+
+`orbit()` aceptado en el editor: `.orbit(1)`, `.orbit(2)`, `.orbit("1 2")`.
+`"orbit"` añadido a `knownMethods` en CodeParser.
+Default `PatternScheduler.defaultOrbit = 1` (verificado contra strudel.cc/learn/effects docs).
