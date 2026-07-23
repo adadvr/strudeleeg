@@ -114,15 +114,25 @@ private func polyBLEP(_ t: Double, dt: Double) -> Double {
 
 private enum ADSRStage { case attack, decay, sustain, release, idle }
 
-// MARK: - Synth headroom (Bug 3 fix)
+// MARK: - Synth headroom (Bug 3 fix, empirically calibrated 2026-07-23)
 //
 // Oscillators exit at amplitude ~full-scale × gain.  In Strudel/Web Audio the
 // synth voices are mixed at a noticeably lower level relative to drum samples.
 // A fixed headroom factor of 0.3 is applied to every synth sample so that
 // gain(1.0) on a sawtooth does not mask a kick drum at gain(0.95).
 //
-// COMPATIBILITY.md: the absolute level of synths vs samples is an approximation
-// of the Strudel mix, not calibrated bit-for-bit against Web Audio.
+// Calibration (2026-07-23, VolumeCalibrate + WebProbe --record):
+//   Method: WKUserScript monkey-patch of AudioNode.prototype.connect → ScriptProcessorNode
+//   capture → RMS measured on real Strudel WebView output; same patterns measured on
+//   live MiniEngine mainMixer tap.
+//
+//   All four waveforms are within ±30% of Strudel with synthHeadroom=0.3:
+//     triangle: −1%   sawtooth: +18%   sine: +5%   square: +17%
+//
+//   No change to synthHeadroom is needed. The triangle amplitude was separately
+//   fixed by correcting the triDrive formula in trigger() — see that function.
+//
+// COMPATIBILITY.md § "Volume Calibration (2026-07-23)" contains the full table.
 private let synthHeadroom: Float = 0.3
 
 // MARK: - Host time to seconds conversion (Bug 2 fix)
@@ -232,15 +242,37 @@ final class SynthVoice {
         self.startHostSeconds = startHostSeconds
 
         // Bug 2 fix: pre-compute frequency-compensated drive constant for triangle.
-        // k = (1-L) / (1 - L^(1/(2*dt)))  where L=0.999.
-        // This makes the leaky integrator's steady-state amplitude ≈ 1.0 for all freqs.
-        // Clamped to [1e-6, 1.0] to avoid divide-by-zero at extreme freqs.
+        // The leaky integrator  y[n] = k·sq[n] + L·y[n-1]  (L=0.999, sq=±1 square wave)
+        // converges to a triangle with steady-state peaks at ±P where:
+        //
+        //   P = D / (1 + L^(N/2))    where D = k·(1−L^(N/2))/(1−L)
+        //
+        // Setting P=1 requires D = 1 + L^(N/2), i.e.:
+        //
+        //   k = (1−L) · (1 + L^(N/2)) / (1 − L^(N/2))
+        //
+        // Derivation:
+        //   At steady state each half starts from the other half's end value (not 0).
+        //   Let A = L^(N/2), D = k·(1−A)/(1−L).
+        //   P = A·Q + D,  Q = A·P − D  → P(1−A²) = D·(1−A) → P = D/(1+A).
+        //   Setting P=1: D = 1+A → k = (1−L)·D/(1−A) = (1−L)·(1+A)/(1−A). ∎
+        //
+        // The earlier formula k=(1−L)/(1−A) ignored the cross-half residue and
+        // produced steady-state peaks at P≈0.51 instead of 1.0 (empirically
+        // confirmed: tri RMS was ~50% of sine RMS vs the theoretical 81.6%).
+        //
+        // The clamp max is raised to 2.0 (was 1.0) because the new formula can
+        // exceed 1.0 for very low frequencies where Lpow → 0 (factor →1, same
+        // as before) but near the Nyquist it can approach 2.0. Values are clamped
+        // to [1e-6, 2.0] to stay within the ±1 oscillator output range after the
+        // leaky integrator's max() clamp in the render block.
         let dtClamped = max(1e-6, freq / sampleRate)
         let L = 0.999
-        let halfPeriodSamples = 0.5 / dtClamped   // N/2
+        let halfPeriodSamples = 0.5 / dtClamped   // N/2 = sampleRate/(2·freq)
         let Lpow = pow(L, halfPeriodSamples)       // L^(N/2)
         let denom = max(1e-9, 1.0 - Lpow)
-        self.triDrive = max(1e-6, min(1.0, (1.0 - L) / denom))  // (1-L)/(1-L^(N/2))
+        // Correct formula: k = (1−L)·(1+Lpow) / (1−Lpow)
+        self.triDrive = max(1e-6, min(2.0, (1.0 - L) * (1.0 + Lpow) / denom))
 
         self.atkSamp     = max(1, Int(attack  * sampleRate))
         self.decSamp     = max(1, Int(decay   * sampleRate))
@@ -341,20 +373,18 @@ final class SynthVoice {
                 // Integrate polyBLEP square via leaky integrator with frequency-
                 // compensated drive so output amplitude ≈ 1.0 at all frequencies.
                 //
-                // Bug 2 fix — frequency-independent amplitude:
-                //   The leaky integrator y[n] = k * sq[n] + L * y[n-1] has steady-state
-                //   peak amplitude:  A = k * (1 - L^(N/2)) / (1-L)
-                //   where N = sampleRate/freq (samples per period), L = leak = 0.999.
+                // Calibration fix (VolumeCalibrate 2026-07-23) — correct steady-state peak:
+                //   The correct drive formula accounts for the cross-half residue:
+                //   k = (1−L)·(1+L^(N/2)) / (1−L^(N/2))
+                //   This gives peak amplitude P = 1.0 at steady state for all frequencies.
                 //
-                //   Setting A = 1 requires:  k = (1-L) / (1 - L^(1/(2*dt)))
-                //   where dt = freq/sampleRate.
+                //   Bug 2 fix (earlier) fixed frequency-independence but used the wrong
+                //   formula k=(1−L)/(1−L^(N/2)) which gave P≈0.51 (ignored residue).
+                //   The calibrated VolumeCalibrate confirmed triangle RMS was ~50% of sine,
+                //   vs the theoretical 81.6% (√3/2 / √2/2). This fix corrects it.
                 //
-                //   This drive constant is computed once per voice at trigger time
-                //   and stored in triDrive (see trigger()). The leak L = 0.999 is
-                //   kept for band-limiting; only the drive changes.
-                //
-                //   Before fix: drive = 4*dt → A = 4000*dt ∝ freq → e5 ≈6× quiet.
-                //   After fix:  drive = triDrive → A ≈ 1.0 at all frequencies.
+                //   triDrive is pre-computed in trigger(). The leak L=0.999 is preserved
+                //   for band-limiting; only the drive changes.
                 var sq = phase < 0.5 ? 1.0 : -1.0
                 sq += polyBLEP(phase, dt: dt)
                 sq -= polyBLEP(fmod(phase + 0.5, 1.0), dt: dt)

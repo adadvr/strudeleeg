@@ -124,14 +124,15 @@ private final class OfflineVoice {
         self.isActive         = true
         self.birthSample      = birthSample
 
-        // Bug 2 fix: pre-compute frequency-compensated drive for triangle integrator.
-        // k = (1-L) / (1 - L^(N/2)) where L=0.999, N=sampleRate/freq.
-        // Makes steady-state triangle amplitude ≈ 1.0 at all frequencies.
+        // Calibration fix: correct triDrive formula for steady-state peak amplitude = 1.0.
+        // Previous formula k=(1−L)/(1−Lpow) gave peak≈0.51 (ignored cross-half residue).
+        // Correct formula: k = (1−L)·(1+Lpow)/(1−Lpow).
+        // See SynthVoice.swift trigger() derivation for full math.
         let dtv = max(1e-6, freq / sampleRate)
         let L = 0.999
         let Lpow = pow(L, 0.5 / dtv)          // L^(N/2)
         let denom = max(1e-9, 1.0 - Lpow)
-        self.triDrive = max(1e-6, min(1.0, (1.0 - L) / denom))
+        self.triDrive = max(1e-6, min(2.0, (1.0 - L) * (1.0 + Lpow) / denom))
     }
 
     /// Render frameCount samples into buffer (accumulate). Returns false when idle.

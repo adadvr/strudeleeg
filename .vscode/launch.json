@@ -79,6 +79,26 @@
             "target": "AudioValidate",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release AudioValidate"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Debug VolumeCalibrate",
+            "target": "VolumeCalibrate",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug VolumeCalibrate"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:strudeleeg}",
+            "name": "Release VolumeCalibrate",
+            "target": "VolumeCalibrate",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release VolumeCalibrate"
         }
     ]
 }

@@ -19,6 +19,10 @@ let package = Package(
             name: "AudioValidate",
             targets: ["AudioValidate"]
         ),
+        .executable(
+            name: "VolumeCalibrate",
+            targets: ["VolumeCalibrate"]
+        ),
     ],
     dependencies: [
         .package(path: "MiniEngine"),
@@ -58,6 +62,15 @@ let package = Package(
                 .product(name: "MiniEngine", package: "MiniEngine"),
             ],
             path: "Sources/AudioValidate"
+        ),
+        // Live RMS calibration harness: taps mainMixer in real-time to measure
+        // RMS of synth vs sample patterns and calibrate synthHeadroom.
+        .executableTarget(
+            name: "VolumeCalibrate",
+            dependencies: [
+                .product(name: "MiniEngine", package: "MiniEngine"),
+            ],
+            path: "Sources/VolumeCalibrate"
         ),
     ]
 )

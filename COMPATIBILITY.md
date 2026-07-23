@@ -130,7 +130,8 @@ AVAudioSourceNode (voice pool, 8 voices)
 - Both EQ bands are bypassed by default; activated when lpf/hpf called.
 - ADSR envelope is computed per-voice in the render block (no Apple AU needed for envelope).
 - **Sample-accurate onset (Bug 2 fix)**: Each voice stores its scheduled `startHostSeconds` (absolute host-clock time, same domain as `mach_absolute_time`). The AVAudioSourceNode render block reads `AudioTimeStamp.mHostTime` of frame 0, converts to seconds, and computes `startFrame = Int((startHostSeconds − bufferStart) × sampleRate)`. The voice renders silence for frames 0..<startFrame and audio from startFrame onward — eliminating the pre-fix up-to-lookahead (400ms) early triggering.
-- **Synth headroom (Bug 3 fix)**: A fixed factor `synthHeadroom = 0.3` is applied in the render block (`sample × gain × 0.3`). This keeps synth voices at a level that does not mask drum samples at gain(0.95). **Approximation**: the level is chosen by ear/judgment — it is NOT a bit-accurate calibration against Web Audio / Strudel's internal mix. Documented compromise.
+- **Synth headroom (Bug 3 fix, empirically calibrated 2026-07-23)**: A fixed factor `synthHeadroom = 0.3` is applied in the render block (`sample × gain × 0.3`). This factor was empirically validated against Strudel's real output using `WebProbe --record` (WKUserScript monkey-patch, ScriptProcessorNode capture). See [Volume Calibration](#volume-calibration-2026-07-23) below.
+- **Triangle waveform amplitude fix (2026-07-23)**: The triDrive formula for the leaky integrator was corrected from `k=(1−L)/(1−Lpow)` to `k=(1−L)×(1+Lpow)/(1−Lpow)`. The original formula ignored the cross-half residue and produced steady-state peaks at ~0.51 instead of 1.0, making triangle ~50% too quiet. The corrected formula gives peak=1.0 at all frequencies. See `SynthVoice.swift trigger()` for derivation.
 
 ## Resonance mapping note (Fase 3)
 
@@ -158,7 +159,7 @@ All oscillators are band-limited using polyBLEP corrections (standard public-dom
 | `sine` | sin(2π·phase) | Trivial, alias-free |
 | `sawtooth` | naive saw + polyBLEP at phase=0 | Suppresses aliasing at discontinuity |
 | `square` | naive square + polyBLEP at 0 and 0.5 | Suppresses aliasing at both transitions |
-| `triangle` | leaky integrator of polyBLEP square (leak=0.999) | Scaled by 4×dt; DC stable |
+| `triangle` | leaky integrator of polyBLEP square (leak=0.999) | Corrected drive formula k=(1−L)·(1+Lpow)/(1−Lpow) for peak=1.0 |
 
 ## What is NOT supported (Fase 3)
 
@@ -316,3 +317,54 @@ When `dec()` / `att()` / `sus()` / `rel()` (or their long forms) are set on a sa
 an ADSR amplitude envelope is applied to the PCM buffer before scheduling.
 If **none** of the ADSR parameters are set, the buffer is passed through unchanged — no change
 in sound for existing patterns that don't use ADSR. This is the backward-compatibility guarantee.
+
+---
+
+## Volume Calibration (2026-07-23)
+
+**Method:** `WebProbe --record` mode. A `WKUserScript` injected at `.atDocumentStart` patches
+`AudioNode.prototype.connect` before `strudel-bundle.js` loads. Any node connecting to
+`ctx.destination` is also connected to a `ScriptProcessorNode(4096, 2, 2)` that accumulates
+channel-L samples in `window.__captureChunks`. After N seconds, Swift extracts samples
+via `callAsyncJavaScript` (base64 chunks) and computes RMS ignoring the first 0.3s warmup.
+sampleRate = 44100 Hz in all cases. All patterns at `cps=0.5` (1 cycle = 2 seconds).
+
+### Strudel reference (real WebView output)
+
+| Pattern | RMS | Ratio/bd |
+|---|---|---|
+| `s("bd*4").gain(0.95)` | 0.213416 | 1.000 (reference) |
+| `note("a4").sound("triangle").gain(0.5)` | 0.052425 | 0.2457 |
+| `note("a4").sound("sawtooth").gain(0.5)` | 0.044148 | 0.2069 |
+| `note("a4").sound("sine").gain(0.5)` | 0.064196 | 0.3008 |
+| `note("a4").sound("square").gain(0.5)` | 0.076606 | 0.3590 |
+| `stack(bd*4, triangle a4 e5)` | 0.224318 | — |
+
+### MiniEngine (after calibration, synthHeadroom=0.3)
+
+After fixing the triangle triDrive formula, all four waveforms are within ±30% of Strudel:
+
+| Waveform | RMS (mini) | Ratio/bd (mini) | vs Strudel |
+|---|---|---|---|
+| bd | 0.2112 | 1.000 | — |
+| triangle | 0.0514 | 0.2435 | −1% ✓ |
+| sawtooth | 0.0513 | 0.2434 | +18% ✓ |
+| sine | 0.0668 | 0.3164 | +5% ✓ |
+| square | 0.0889 | 0.4204 | +17% ✓ |
+
+**Tolerance target: ±30% (≈±2.3 dB).** All waveforms are within tolerance.
+
+**Before the triangle fix** (wrong triDrive formula), triangle was at **−49%** (−5.8 dB) relative to
+Strudel. The formula produced steady-state peaks at 0.51 instead of 1.0. After fix: −1%.
+
+### Regression test
+
+`LiveEngineTests.testSynthBdRatioMatchesStrudel` measures the ratio RMS_triangle/RMS_bd on the
+live engine and asserts it falls in [0.1719, 0.3193] (Strudel reference 0.2457 ±30%).
+
+### synthHeadroom decision
+
+`synthHeadroom = 0.3` is empirically validated. No change needed.
+The triangle amplitude fix (triDrive formula) brought triangle into range without changing the
+global headroom factor. A single global headroom is sufficient (spread across waveforms is ≤1.5×
+after the fix: saw 1.17, sine 1.05, square 1.17, triangle 0.99).
