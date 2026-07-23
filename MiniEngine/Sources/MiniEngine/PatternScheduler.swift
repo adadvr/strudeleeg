@@ -98,6 +98,15 @@ private final class LayerGroup {
     }
 }
 
+// MARK: - Layer/name pair
+
+/// Identifies a unique (layer-index, audio-name) pair used as a chain key.
+/// Each stack branch gets its own AVAudio sub-graph, indexed by (layerIdx, name).
+private struct LayerNamePair: Hashable {
+    let layerIdx: Int
+    let name: String
+}
+
 // MARK: - PatternScheduler
 
 public final class PatternScheduler {
@@ -123,10 +132,20 @@ public final class PatternScheduler {
     private var startHostTime: Double = 0
     private var scheduledUpTo: Double = 0
     private var timerSource: DispatchSourceTimer?
-    private var buffers: [String: AVAudioPCMBuffer] = [:]
-    private var groups: [String: LayerGroup] = [:]
-    private var synthLayers: [String: SynthLayer] = [:]   // keyed by synth name
+    private var buffers: [String: AVAudioPCMBuffer] = [:]          // keyed by sample name (no duplication)
+    private var groups: [String: LayerGroup] = [:]                  // keyed by "\(layerIdx)#\(sampleName)"
+    private var synthLayers: [String: SynthLayer] = [:]             // keyed by "\(layerIdx)#\(synthName)"
     private let poolQueue = DispatchQueue(label: "com.miniengine.scheduler", qos: .userInteractive)
+
+    // MARK: - Layer key helper
+
+    /// Build the chain key for a sample/synth from the _layer control field (default 0).
+    /// Format: "\(layerIndex)#\(name)".  This gives each stack branch its own
+    /// effect chain (EQ, reverb, delay, panner) and voice pool while buffers
+    /// (which are large) are still deduplicated by plain sample name.
+    public static func layerKey(layerIdx: Int, name: String) -> String {
+        "\(layerIdx)#\(name)"
+    }
 
     // MARK: - Init
 
@@ -153,24 +172,40 @@ public final class PatternScheduler {
         stop()
         self.pattern = pattern
 
-        // Pre-scan first few cycles to find sample/synth names
+        // Pre-scan first few cycles to find sample/synth names AND their layer indices.
+        // Each unique (layerIdx, name) pair gets its own chain; buffers are still
+        // deduplicated by plain sample name to avoid memory duplication.
         let scanSpan = TimeSpan(Rational(0), Rational(4))
         let previewHaps = pattern.query(scanSpan)
 
-        // Separate synth names from sample names
-        let allSValues = Set(previewHaps.compactMap { $0.value["s"]?.stringValue })
-        let synths     = allSValues.filter { isSynthName($0) }
-        let samples    = allSValues.filter { !isSynthName($0) }
+        // Collect (layerIdx, sName) pairs
+        var samplePairs: Set<LayerNamePair> = []
+        var synthPairs:  Set<LayerNamePair> = []
+        var sampleNames: Set<String>        = []
+
+        for hap in previewHaps {
+            guard let sVal = hap.value["s"]?.stringValue else { continue }
+            let bankName = hap.value["bank"]?.stringValue ?? ""
+            let sName    = bankName.isEmpty ? sVal : "\(bankName)_\(sVal)"
+            let layerIdx = Int(hap.value["_layer"]?.doubleValue ?? 0.0)
+            let pair     = LayerNamePair(layerIdx: layerIdx, name: sName)
+            if isSynthName(sName) {
+                synthPairs.insert(pair)
+            } else {
+                samplePairs.insert(pair)
+                sampleNames.insert(sName)
+            }
+        }
 
         do {
-            try preloadBuffers(for: samples)
+            try preloadBuffers(for: sampleNames)
         } catch {
             print("[PatternScheduler] Buffer preload failed: \(error)")
             return
         }
 
-        buildGroups(for: samples)
-        buildSynthLayers(for: synths)
+        buildGroups(for: samplePairs)
+        buildSynthLayers(for: synthPairs)
 
         if !audioEngine.isRunning {
             do {
@@ -265,6 +300,9 @@ public final class PatternScheduler {
             let bankName = hap.value["bank"]?.stringValue ?? ""
             let sName = bankName.isEmpty ? sBase : "\(bankName)_\(sBase)"
 
+            // Bug 1 fix: read _layer index (0 if not set) for per-branch chain isolation.
+            let layerIdx = Int(hap.value["_layer"]?.doubleValue ?? 0.0)
+
             // Event absolute time: onset of the hap's part in cycle units → seconds
             let hapCycleOnset = hap.part.begin
             let hapSeconds    = hapCycleOnset.toDouble * cycleSeconds
@@ -305,6 +343,7 @@ public final class PatternScheduler {
                 // ── Synth route ─────────────────────────────────────────────
                 dispatchSynthHap(
                     synthName:    sName,
+                    layerIdx:     layerIdx,
                     midiNote:     midiNote ?? Double(synthDefaultMIDI),
                     gain:         gainValue,
                     room:         roomValue,
@@ -335,6 +374,7 @@ public final class PatternScheduler {
                                    || sustainVal != nil || releaseVal != nil
                 dispatchHap(
                     sampleName:    sName,
+                    layerIdx:      layerIdx,
                     midiNote:      midiNote.map { Int($0) },
                     gain:          gainValue,
                     room:          roomValue,
@@ -364,6 +404,7 @@ public final class PatternScheduler {
 
     private func dispatchHap(
         sampleName:    String,
+        layerIdx:      Int,
         midiNote:      Int?,
         gain:          Double,
         room:          Double?,
@@ -387,19 +428,22 @@ public final class PatternScheduler {
         release:       Double? = nil,
         durationSec:   Double? = nil
     ) {
-        // Lazily create a group for this sample if needed
-        if groups[sampleName] == nil {
+        // Bug 1 fix: chain key is layer-qualified; buffers are keyed by plain name.
+        let chainKey = PatternScheduler.layerKey(layerIdx: layerIdx, name: sampleName)
+
+        // Lazily create a group for this (layer, sample) pair if needed
+        if groups[chainKey] == nil {
             do {
                 try preloadBuffers(for: [sampleName])
             } catch {
                 print("[PatternScheduler] Cannot preload \(sampleName): \(error)")
                 return
             }
-            buildGroups(for: [sampleName])
-            if let g = groups[sampleName], !g.player.isPlaying { g.player.play() }
+            buildGroups(for: [LayerNamePair(layerIdx: layerIdx, name: sampleName)])
+            if let g = groups[chainKey], !g.player.isPlaying { g.player.play() }
         }
 
-        guard let group = groups[sampleName],
+        guard let group = groups[chainKey],
               let sourceBuffer = buffers[sampleName],
               let avTime = avAudioTime(forHostSeconds: absoluteTime) else { return }
 
@@ -512,6 +556,7 @@ public final class PatternScheduler {
 
     private func dispatchSynthHap(
         synthName:    String,
+        layerIdx:     Int,
         midiNote:     Double,
         gain:         Double,
         room:         Double?,
@@ -533,11 +578,15 @@ public final class PatternScheduler {
         crush:        Double? = nil,
         vowel:        String? = nil
     ) {
-        // Lazily create a SynthLayer for this synth name
-        if synthLayers[synthName] == nil {
-            buildSynthLayers(for: [synthName])
+        // Bug 1 fix: chain key is layer-qualified so each stack branch has its own
+        // SynthLayer (own voice pool + own EQ/reverb/delay/panner chain).
+        let chainKey = PatternScheduler.layerKey(layerIdx: layerIdx, name: synthName)
+
+        // Lazily create a SynthLayer for this (layer, synth) pair
+        if synthLayers[chainKey] == nil {
+            buildSynthLayers(for: [LayerNamePair(layerIdx: layerIdx, name: synthName)])
         }
-        guard let layer = synthLayers[synthName] else { return }
+        guard let layer = synthLayers[chainKey] else { return }
 
         let sampleRate = audioEngine.outputNode.outputFormat(forBus: 0).sampleRate
         let freq = synthFrequency(midi: midiNote)
@@ -578,15 +627,19 @@ public final class PatternScheduler {
 
     // MARK: - Synth layer construction
 
-    private func buildSynthLayers(for synthNames: Set<String>) {
+    /// Build one SynthLayer per (layerIdx, synthName) pair.
+    /// The chain key is "\(layerIdx)#\(synthName)" so each stack branch gets its
+    /// own voice pool, EQ, reverb, delay and panner.
+    private func buildSynthLayers(for pairs: Set<LayerNamePair>) {
         let mainMixer  = audioEngine.mainMixerNode
         let sampleRate = audioEngine.outputNode.outputFormat(forBus: 0).sampleRate
         let sr = sampleRate > 0 ? sampleRate : 44100.0
 
-        for name in synthNames {
-            if synthLayers[name] != nil { continue }
+        for pair in pairs {
+            let chainKey = PatternScheduler.layerKey(layerIdx: pair.layerIdx, name: pair.name)
+            if synthLayers[chainKey] != nil { continue }
 
-            let layer = SynthLayer(synthName: name, sampleRate: sr)
+            let layer = SynthLayer(synthName: pair.name, sampleRate: sr)
 
             audioEngine.attach(layer.sourceNode)
             audioEngine.attach(layer.eq)
@@ -605,18 +658,24 @@ public final class PatternScheduler {
             audioEngine.connect(layer.vowelEQ,     to: layer.panner,     format: nil)
             audioEngine.connect(layer.panner,      to: mainMixer,        format: nil)
 
-            synthLayers[name] = layer
-            print("[PatternScheduler] Built synth chain for: \(name)")
+            synthLayers[chainKey] = layer
+            print("[PatternScheduler] Built synth chain for: \(chainKey)")
         }
     }
 
     // MARK: - Group construction
 
-    private func buildGroups(for sampleNames: Set<String>) {
+    /// Build one LayerGroup per (layerIdx, sampleName) pair.
+    /// The chain key is "\(layerIdx)#\(sampleName)" — each stack branch gets its own
+    /// player/varispeed/EQ/reverb/delay/panner chain.
+    /// Buffers are still keyed by plain sampleName (deduplication — no memory waste).
+    private func buildGroups(for pairs: Set<LayerNamePair>) {
         let mainMixer = audioEngine.mainMixerNode
 
-        for name in sampleNames {
-            if groups[name] != nil { continue }
+        for pair in pairs {
+            let chainKey = PatternScheduler.layerKey(layerIdx: pair.layerIdx, name: pair.name)
+            let name     = pair.name
+            if groups[chainKey] != nil { continue }
 
             let player     = AVAudioPlayerNode()
             let varispeed  = AVAudioUnitVarispeed()
@@ -689,9 +748,9 @@ public final class PatternScheduler {
                 vowelEQ:    vowelEQ,
                 panner:     panner
             )
-            groups[name] = group
+            groups[chainKey] = group
 
-            print("[PatternScheduler] Built chain for sample: \(name)")
+            print("[PatternScheduler] Built chain for sample: \(chainKey)")
         }
     }
 

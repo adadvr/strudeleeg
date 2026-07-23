@@ -138,12 +138,19 @@ public struct CodeParser {
                 return ParseResult(pattern: .silence, cps: cps)
             }
             if segments.count == 1 {
-                // Single active pattern — parse normally
+                // Single active pattern — parse normally (parseLayerOrStack tags _layer=0)
                 let pat = try parseLayerOrStack(segments[0])
                 return ParseResult(pattern: pat, cps: cps)
             }
-            // Multiple segments → implicit stack
-            let layers = try segments.map { try parseLayerOrStack($0) }
+            // Multiple $: segments → implicit stack; each segment is a distinct layer.
+            // Re-inject _layer with the outer segment index (overriding the inner 0).
+            let layers = try segments.enumerated().map { (idx, seg) -> ControlPattern in
+                let pat = try parseLayerOrStack(seg)
+                // Overwrite _layer using map to avoid structural expansion (see
+                // the comment in parseLayerOrStack for why we use map not withControl).
+                let layerVal = ControlValue.double(Double(idx))
+                return pat.map { var v = $0; v["_layer"] = layerVal; return v }
+            }
             return ParseResult(pattern: stackCP(layers), cps: cps)
         }
 
@@ -160,15 +167,29 @@ public struct CodeParser {
     }
 
     /// Parse a code string that may be a stack(...) call or a single layer expression.
+    /// Each branch of a stack gets a `_layer` control field (double index, 0-based)
+    /// so PatternScheduler can key each branch into its own effect chain + voice pool.
+    /// A plain (non-stack) layer gets `_layer = 0`.
+    ///
+    /// Implementation note: `_layer` is injected via `.map` (not `.withControl`) to
+    /// avoid the appLeft structural expansion that `.withControl(.pure(...))` would
+    /// produce when base haps have whole-spans longer than 1 cycle (e.g. slow(4)).
     private func parseLayerOrStack(_ code: String) throws -> ControlPattern {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("stack(") {
             let inner = try extractArgs(trimmed, function: "stack")
             let parts = splitTopLevelCommas(inner)
-            let layers = try parts.map { try parseLayerExpr($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let layers = try parts.enumerated().map { (idx, part) -> ControlPattern in
+                let pat = try parseLayerExpr(part.trimmingCharacters(in: .whitespacesAndNewlines))
+                // Inject _layer by mapping over hap values — no structural change.
+                let layerVal = ControlValue.double(Double(idx))
+                return pat.map { var v = $0; v["_layer"] = layerVal; return v }
+            }
             return stackCP(layers)
         }
-        return try parseLayerExpr(trimmed)
+        // Single layer — tag as layer 0
+        let pat = try parseLayerExpr(trimmed)
+        return pat.map { var v = $0; v["_layer"] = .double(0.0); return v }
     }
 
     // MARK: - Comment stripping

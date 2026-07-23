@@ -355,4 +355,133 @@ final class BugFixTests: XCTestCase {
                               "\(wave): output exceeds headroom ceiling of 0.3")
         }
     }
+
+    // MARK: - Bug 1 fix: _layer tagging and layer key distinctness
+
+    /// stack() must inject distinct _layer values per branch.
+    func testStackLayerTagsAreDistinct() throws {
+        let parser = CodeParser()
+        let pat = try parser.parse("""
+            stack(
+              note("a2").sound("sawtooth"),
+              note("e5").sound("sawtooth")
+            )
+            """)
+        let haps = pat.firstCycle().sorted {
+            ($0.value["_layer"]?.doubleValue ?? 0) < ($1.value["_layer"]?.doubleValue ?? 0)
+        }
+        let layers = Set(haps.compactMap { $0.value["_layer"]?.doubleValue })
+        XCTAssertEqual(layers, [0.0, 1.0],
+                       "stack() must tag branches with _layer 0 and 1")
+    }
+
+    /// Single-layer (non-stack) pattern must have _layer = 0.
+    func testSingleLayerTagIsZero() throws {
+        let parser = CodeParser()
+        let pat = try parser.parse(#"note("c4").sound("sine")"#)
+        let haps = pat.firstCycle()
+        XCTAssertFalse(haps.isEmpty)
+        for hap in haps {
+            XCTAssertEqual(hap.value["_layer"]?.doubleValue, 0.0,
+                           "Single-layer pattern must have _layer = 0")
+        }
+    }
+
+    /// $: multi-layer syntax must produce distinct _layer per segment.
+    func testDollarColonLayerTagsAreDistinct() throws {
+        let parser = CodeParser()
+        let pat = try parser.parse("""
+            $: note("a2").sound("sawtooth")
+            $: note("e5").sound("sawtooth")
+            """)
+        let haps = pat.firstCycle()
+        let layers = Set(haps.compactMap { $0.value["_layer"]?.doubleValue })
+        XCTAssertEqual(layers, [0.0, 1.0],
+                       "$: segments must tag distinct _layer values 0 and 1")
+    }
+
+    /// Adding _layer must NOT change hap count (map not withControl).
+    func testLayerTagDoesNotDuplicateHaps() throws {
+        let parser = CodeParser()
+        // slow(4) pattern: 1 hap with whole=[0,4). Using withControl would
+        // multiply by 4; using map must keep it at 1.
+        let pat = try parser.parse(#"s("pad").slow(4)"#)
+        let haps = pat.queryArc(Rational(0), Rational(1))
+        XCTAssertEqual(haps.count, 1,
+                       "_layer injection via map must not duplicate haps (was broken if using withControl)")
+    }
+
+    /// PatternScheduler.layerKey produces distinct keys per layer index.
+    func testLayerKeyDistinctness() {
+        let k0 = PatternScheduler.layerKey(layerIdx: 0, name: "sawtooth")
+        let k1 = PatternScheduler.layerKey(layerIdx: 1, name: "sawtooth")
+        XCTAssertNotEqual(k0, k1, "Different layer indices must produce different chain keys")
+        XCTAssertEqual(k0, "0#sawtooth")
+        XCTAssertEqual(k1, "1#sawtooth")
+    }
+
+    // MARK: - Bug 2 fix (triangle): frequency-independent amplitude
+
+    /// Triangle RMS at a2 (110 Hz) vs e5 (659 Hz) must be within 2× of each other.
+    /// Before fix: ratio was ~6×.
+    func testTriangleAmplitudeFrequencyIndependent() {
+        let sr = 44100.0
+        let durFrames = Int(0.5 * sr)   // 500ms render window
+
+        func renderTriangleRMS(freq: Double) -> Double {
+            let voice = SynthVoice()
+            voice.trigger(waveform: "triangle", freq: freq, gain: 1.0,
+                          attack: 0.0, decay: 0.0, sustain: 1.0, release: 1.0,
+                          durationSec: 1.0, sampleRate: sr, birthSample: 0,
+                          startHostSeconds: 0.0)
+            var buf = [Float](repeating: 0, count: durFrames)
+            buf.withUnsafeMutableBufferPointer { ptr in
+                voice.render(into: ptr.baseAddress!, frameCount: durFrames,
+                             bufferStartSeconds: 0.0, sampleRate: sr)
+            }
+            // Skip first 50ms (transient from integrator settling)
+            let skipFrames = Int(0.05 * sr)
+            let window = buf[skipFrames...]
+            var sumSq: Float = 0
+            for s in window { sumSq += s * s }
+            return Double(sqrt(sumSq / Float(window.count)))
+        }
+
+        let rmsLow  = renderTriangleRMS(freq: 110.0)   // a2
+        let rmsHigh = renderTriangleRMS(freq: 659.255)  // e5
+
+        XCTAssertGreaterThan(rmsLow,  0.001, "Triangle a2 must produce non-zero RMS")
+        XCTAssertGreaterThan(rmsHigh, 0.001, "Triangle e5 must produce non-zero RMS")
+
+        let ratio = rmsHigh > 1e-9 ? rmsLow / rmsHigh : 999.0
+        XCTAssertGreaterThan(ratio, 0.5,
+                             "Triangle a2/e5 RMS ratio must be > 0.5 (was ~6 before fix)")
+        XCTAssertLessThan(ratio, 2.0,
+                          "Triangle a2/e5 RMS ratio must be < 2.0 (was ~6 before fix)")
+    }
+
+    /// Triangle must produce the correct fundamental frequency.
+    func testTrianglePitchAtE5() {
+        let sr = 44100.0
+        let frameCount = Int(0.3 * sr)
+        let voice = SynthVoice()
+        voice.trigger(waveform: "triangle", freq: 659.255, gain: 1.0,
+                      attack: 0.0, decay: 0.0, sustain: 1.0, release: 1.0,
+                      durationSec: 1.0, sampleRate: sr, birthSample: 0,
+                      startHostSeconds: 0.0)
+        var buf = [Float](repeating: 0, count: frameCount)
+        buf.withUnsafeMutableBufferPointer { ptr in
+            voice.render(into: ptr.baseAddress!, frameCount: frameCount,
+                         bufferStartSeconds: 0.0, sampleRate: sr)
+        }
+        // Count zero-crossings (rising edge) to estimate frequency
+        // For triangle at 659 Hz, we expect ~659*0.3 ≈ 198 full cycles in 300ms.
+        var crossings = 0
+        for i in 1..<frameCount {
+            if buf[i-1] <= 0 && buf[i] > 0 { crossings += 1 }
+        }
+        let estimatedFreq = Double(crossings) / 0.3
+        XCTAssertEqual(estimatedFreq, 659.0, accuracy: 30.0,
+                       "Triangle e5: zero-crossing frequency estimate must be near 659 Hz")
+    }
 }

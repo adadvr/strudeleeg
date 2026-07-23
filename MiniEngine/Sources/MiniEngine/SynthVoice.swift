@@ -197,6 +197,7 @@ final class SynthVoice {
     private var phase:    Double = 0.0
     private var dt:       Double = 0.0  // phase increment per sample
     private var waveform: String = "sine"
+    private var triDrive: Double = 0.001  // Bug 2 fix: freq-compensated drive for triangle
 
     // ── ADSR state ──────────────────────────────────────────────────────────
     private var stage:      ADSRStage = .idle
@@ -229,6 +230,17 @@ final class SynthVoice {
         self.waveform         = waveform.lowercased()
         self.dt               = freq / sampleRate
         self.startHostSeconds = startHostSeconds
+
+        // Bug 2 fix: pre-compute frequency-compensated drive constant for triangle.
+        // k = (1-L) / (1 - L^(1/(2*dt)))  where L=0.999.
+        // This makes the leaky integrator's steady-state amplitude ≈ 1.0 for all freqs.
+        // Clamped to [1e-6, 1.0] to avoid divide-by-zero at extreme freqs.
+        let dtClamped = max(1e-6, freq / sampleRate)
+        let L = 0.999
+        let halfPeriodSamples = 0.5 / dtClamped   // N/2
+        let Lpow = pow(L, halfPeriodSamples)       // L^(N/2)
+        let denom = max(1e-9, 1.0 - Lpow)
+        self.triDrive = max(1e-6, min(1.0, (1.0 - L) / denom))  // (1-L)/(1-L^(N/2))
 
         self.atkSamp     = max(1, Int(attack  * sampleRate))
         self.decSamp     = max(1, Int(decay   * sampleRate))
@@ -326,13 +338,27 @@ final class SynthVoice {
                 sample = s
 
             case "triangle":
-                // Integrate polyBLEP square via leaky integrator, scale to ±1
+                // Integrate polyBLEP square via leaky integrator with frequency-
+                // compensated drive so output amplitude ≈ 1.0 at all frequencies.
+                //
+                // Bug 2 fix — frequency-independent amplitude:
+                //   The leaky integrator y[n] = k * sq[n] + L * y[n-1] has steady-state
+                //   peak amplitude:  A = k * (1 - L^(N/2)) / (1-L)
+                //   where N = sampleRate/freq (samples per period), L = leak = 0.999.
+                //
+                //   Setting A = 1 requires:  k = (1-L) / (1 - L^(1/(2*dt)))
+                //   where dt = freq/sampleRate.
+                //
+                //   This drive constant is computed once per voice at trigger time
+                //   and stored in triDrive (see trigger()). The leak L = 0.999 is
+                //   kept for band-limiting; only the drive changes.
+                //
+                //   Before fix: drive = 4*dt → A = 4000*dt ∝ freq → e5 ≈6× quiet.
+                //   After fix:  drive = triDrive → A ≈ 1.0 at all frequencies.
                 var sq = phase < 0.5 ? 1.0 : -1.0
                 sq += polyBLEP(phase, dt: dt)
                 sq -= polyBLEP(fmod(phase + 0.5, 1.0), dt: dt)
-                // Leaky integrator: triInteg = dt * sq + (1-leak) * triInteg
-                // Scale by 4*dt so output amplitude ≈1 (steady state of integrator)
-                triInteg = 4.0 * dt * sq + triInteg * 0.999
+                triInteg = triDrive * sq + triInteg * 0.999
                 sample = max(-1.0, min(1.0, triInteg))
 
             default:
