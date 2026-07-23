@@ -91,7 +91,27 @@ rm -rf "$DMG_STAGING"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "==> 5. Signing DMG"
+# ---------------------------------------------------------------------------
+DEVELOPER_ID="Developer ID Application: Moonshot.la LLC (963B3Q33V9)"
+SIGN_ID="${CODESIGN_IDENTITY:-}"
+if [ -z "$SIGN_ID" ] && security find-identity -v -p codesigning 2>/dev/null | grep -q "963B3Q33V9"; then
+    SIGN_ID="$DEVELOPER_ID"
+fi
+if [ -n "$SIGN_ID" ] && [ "$SIGN_ID" != "-" ]; then
+    codesign --force --timestamp -s "$SIGN_ID" "$DMG_PATH"
+    echo "    Signed DMG with: ${SIGN_ID}"
+else
+    echo "    Skipped (no Developer ID available) — DMG left unsigned."
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "==> Done."
 echo ""
 echo "    DMG path : ${DMG_PATH}"
 echo "    DMG size : $(du -sh "$DMG_PATH" | cut -f1)"
+echo ""
+echo "    Next step (notarization, required for sharing):"
+echo "      bash scripts/notarize.sh"
+echo "    (requires the 'demostrudel-notary' keychain profile — see notarize.sh header)"

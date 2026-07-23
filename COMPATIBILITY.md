@@ -78,6 +78,10 @@ Living document: function → status → equivalence notes.
 | `orbit(n)` | ✅ nativo (P0-4) | Route layer to a named effect bus (integer ≥ 1). Default: orbit=1. Each orbit has its own AVAudioMixerNode (gain/duck prep) → AVAudioUnitReverb → AVAudioUnitDelay → mainMixer. Multiple layers on the same orbit share the reverb tail (same as Strudel). room/delay params updated from last event on that orbit (see orbit bus compromise below). Patternable. |
 | `$:` | ✅ nativo (Fase 5) | Top-level parallel patterns. Each line starting with `$:` defines one pattern; they are stacked implicitly. `_$:` (muted) lines are ignored. Multi-line patterns: body continues until next `$:` / `_$:` line. Limitation: continuation lines must not start with `$:` or `_$:`. |
 | Leading-dot numbers | ✅ nativo (Fase 5) | `.4` accepted everywhere as `0.4` (affects all numeric method args in CodeParser). |
+| `samples('url')` | ✅ nativo (v1.2) | Remote bank loader. `samples('github:user/repo')` or `samples('https://host/strudel.json')`. Registers manifest with SampleBankManager. Lazy download + disk cache. Multiple samples() lines allowed. No-op if manifest unavailable (local fallback). |
+| `:n` variation | ✅ nativo (v1.2) | `s("tabla:3")` → selects variation index 3 (0-based) from remote bank array. Out-of-range → modulo (same as Strudel). `.n("0 3 1")` chain also selects variation; chain value wins over `:n` from `s()`. Default (no :n) → variation 0. |
+| Remote bank buffer | ✅ nativo (v1.2) | SampleBankManager resolves and downloads WAV files. Disk cache: `~/Library/Caches/DemoStrudel/samples/`. Manifest cache: `~/Library/Caches/DemoStrudel/manifests/`. Persists across launches. If sample not ready when event fires → skip + log, no crash. |
+| Sample note base | ✅ C2 = MIDI 36 (v1.2) | Strudel/superdough convention for plain-array samples: `note("c2").s("sitar")` plays at rate 1.0. Rate = `2^((midi−36)/12)`. Verified: superdough.mjs uses `note2speed(note, 36)`. Without `note()` → rate 1.0 (no repitch). |
 
 ## Nota sobre equivalencia estadística del RNG (sometimes/often/rarely)
 
@@ -772,3 +776,98 @@ Total oracle: 71 fixtures, 510 haps. `OracleTests` verifica todo en verde.
 - slice: begin/end fracciones, wrap de índice
 - loopAt: speed=1/n, begin=0, end=1
 - CodeParser: los 14 métodos P2 parseables (incluyendo lambdas en superimpose/chunk)
+
+---
+
+## Remote samples / bancos remotos (v1.2)
+
+### samples() — Carga remota de bancos
+
+```javascript
+samples('github:tidalcycles/dirt-samples')
+samples('https://bucket.region.digitaloceanspaces.com/samples/strudel.json')
+s("bd hh cp")
+```
+
+- `samples('github:user/repo')` → resuelve a `https://raw.githubusercontent.com/user/repo/<branch>/strudel.json`
+- Branch por defecto: `master` para `tidalcycles/dirt-samples` (verificado empíricamente con curl); `main` para otros repos.
+- Forma explícita: `github:user/repo/my-branch`
+- URLs `https://...` y `file://...` pasan directamente (sin transformación).
+- Múltiples `samples()` en el mismo código → cada uno registra su banco; los nombres no colisionan si son distintos.
+- Si la red falla → usa manifest cacheado en disco (fallback offline). Si no hay cache y no hay red → banco local bundleado sigue funcionando.
+
+### Formato real del manifest (dirt-samples master, verificado 2026-07)
+
+```bash
+curl https://raw.githubusercontent.com/tidalcycles/dirt-samples/master/strudel.json | head -1
+```
+
+Resultado empírico:
+```json
+{
+  "_base": "https://raw.githubusercontent.com/Dirt-Samples/master/",
+  "bd": ["bd/BT0A0A7.wav", "bd/BT3A0A7.wav", ...],
+  "tabla": ["tabla/000_bass_flick1.wav", ...],
+  "sitar": ["sitar/000_d_maj_sitar_chorda.wav", ...],
+  "808": ["808/CB.WAV", "808/CH.WAV", ...],
+  "808bd": ["808bd/BD0000.WAV", ...]
+}
+```
+
+- 219 entradas en total.
+- `_base`: URL base para resolver rutas relativas.
+- Todos los valores son arrays de strings (paths relativos). No hay note-maps (`{"c4": [...]}`) en dirt-samples.
+- Los archivos tienen extensiones mixtas (.wav, .WAV) — normalizado al cargar.
+- Las máquinas Roland están como claves `808`, `808bd`, `808cy`, `909`, etc. (no `bank_nombre`). Se acceden directamente por nombre de clave, no con `.bank()`.
+
+### Caché en disco
+
+- **Samples**: `~/Library/Caches/DemoStrudel/samples/<safe-name>.wav`
+- **Manifests**: `~/Library/Caches/DemoStrudel/manifests/<safe-name>.json`
+- Persiste entre lanzamientos. Antes de descargar: verifica existencia en disco.
+- Segundo play del mismo patrón: no descarga (caché en memoria). Segunda sesión: carga desde disco sin red.
+- Para limpiar caché: borrar directorio `~/Library/Caches/DemoStrudel/`.
+
+### Descarga perezosa + prefetch
+
+- Al evaluar un patrón, el scheduler escanea los primeros 4 ciclos para encontrar nombres/índices usados.
+- Llama a `SampleBankManager.prefetchSamples(names:indices:)` ANTES de arrancar el audio.
+- Las descargas son async (URLSession); el audio arranca inmediatamente.
+- Si un sample no está listo cuando le toca sonar → se salta ese evento + log (sin crash ni glitch).
+- El resto del banco NO se descarga (lazy = solo lo que usa el patrón).
+
+### :n variación de sample
+
+```javascript
+s("tabla:0 tabla:3 tabla:1")   // variaciones 0, 3, 1
+s("bd:2")                       // variación 2
+s("tabla")                      // sin :n → variación 0
+```
+
+- `nombre:n` → campo `n=N` en el hap + campo `s=nombre` (sin el colon).
+- El scheduler selecciona `paths[n % paths.length]` (módulo para out-of-range, mismo comportamiento que Strudel).
+- `.n("0 3 1")` chained + `s()` → el valor de chain gana sobre el `:n` del token (merge: right-side wins).
+- Sin `:n` → ningún campo `n` en el hap → el dispatcher usa índice 0 por defecto.
+
+### Nota base para repitch de samples (C2 = MIDI 36)
+
+- **Convención Strudel/superdough**: `note("c2").s("sitar")` → rate = 1.0 (sin repitch).
+- Fórmula: `rate = 2^((midi − 36) / 12)`
+- Verificado: `superdough.mjs` usa `note2speed(note, 36)` — base = C2.
+- Nuestra implementación: misma fórmula. `note("g#4")` → MIDI 68 → rate ≈ 6.35.
+- Sin campo `note()` → rate = 1.0 (sin repitch, backward-compatible).
+- **DIFERENCIA vs versiones anteriores**: el motor previo usaba C4 (MIDI 60) como base — esto producía melodías transpuestas 2 octavas abajo vs Strudel. Corregido en v1.2.
+
+### bank() con banco remoto
+
+- `s("bd").bank("tr909")` → clave de lookup `"tr909_bd"`. El banco local bundleado sigue funcionando igual.
+- dirt-samples NO tiene claves `tr909_bd` — tiene `909` y `808bd`. Para usar máquinas de ritmo de dirt-samples: `s("909")` o `s("808bd")` directamente (sin `.bank()`).
+- Para bank() real con máquinas, se necesitaría un manifest que use el prefijo `tr909_bd` como clave.
+- Preparado para DigitalOcean: `samples('https://bucket.region.do.../strudel.json')` funciona sin tocar código.
+
+### Fallback al banco local bundleado
+
+Si `samples()` no aparece en el código, o si la red falla y no hay manifest en caché:
+- El motor usa exclusivamente las URLs locales pasadas en `init(sampleURLs:)`.
+- Los samples `pad` y `bell` bundleados siguen disponibles.
+- No hay crash ni silencio inesperado.

@@ -26,7 +26,7 @@ final class NativeEngineAdapter: AudioDemoEngine {
     }
 
     init() {
-        let bundle = Bundle.module
+        let bundle = AppBundle.resources
         var urls: [String: URL] = [:]
 
         // Locate the Samples/ directory in the bundle

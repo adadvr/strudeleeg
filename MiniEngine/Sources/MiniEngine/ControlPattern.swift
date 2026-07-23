@@ -702,12 +702,35 @@ public func isSynthName(_ name: String) -> Bool {
 /// When the name is a synth (sawtooth, square, sine, triangle) it also sets
 /// the "synth" field to the same string so the scheduler can distinguish
 /// synth layers from sample layers.
+///
+/// Supports :n variation syntax: "tabla:3" → s="tabla", n=3 (Strudel convention).
+/// Without :n → n defaults to 0. With .n("...") chained, the chain value wins.
+/// Behaviour matches Strudel: s("tabla:3") sets n=3 in the hap, and the
+/// scheduler selects variation index (n % arrayLength) from the bank.
 public func s(_ miniNotation: String) -> ControlPattern {
-    parseMini(miniNotation).map { name -> [String: ControlValue] in
-        var map: [String: ControlValue] = ["s": .string(name)]
-        if isSynthName(name) { map["synth"] = .string(name) }
+    parseMini(miniNotation).map { token -> [String: ControlValue] in
+        // Parse "name:index" variation syntax
+        let (sName, nIdx) = parseColonN(token)
+        var map: [String: ControlValue] = ["s": .string(sName)]
+        if let idx = nIdx {
+            map["n"] = .double(Double(idx))
+        }
+        if isSynthName(sName) { map["synth"] = .string(sName) }
         return map
     }
+}
+
+/// Parse "name:n" token into (name, optional index).
+/// "tabla:3" → ("tabla", 3); "bd" → ("bd", nil); "bd:0" → ("bd", 0).
+func parseColonN(_ token: String) -> (String, Int?) {
+    // Find last ':' to allow names like "tr909:1"
+    guard let colonIdx = token.lastIndex(of: ":") else { return (token, nil) }
+    let name = String(token[..<colonIdx])
+    let rest = String(token[token.index(after: colonIdx)...])
+    if name.isEmpty { return (token, nil) }
+    if let idx = Int(rest) { return (name, idx) }
+    // rest is not a number — treat whole token as name (e.g. "http://..." edge case)
+    return (token, nil)
 }
 
 /// sound("sawtooth") — alias of s() in Strudel.

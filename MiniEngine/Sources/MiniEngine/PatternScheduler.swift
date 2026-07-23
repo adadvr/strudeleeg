@@ -189,6 +189,8 @@ public final class PatternScheduler {
 
     private let audioEngine: AVAudioEngine
     private let sampleURLs: [String: URL]
+    /// Optional remote bank manager. Set by MiniEngine.play() before calling play(pattern:).
+    public var bankManager: SampleBankManager?
 
     // MARK: - State
 
@@ -197,7 +199,9 @@ public final class PatternScheduler {
     private var startHostTime: Double = 0
     private var scheduledUpTo: Double = 0
     private var timerSource: DispatchSourceTimer?
-    private var buffers: [String: AVAudioPCMBuffer] = [:]          // keyed by sample name (no duplication)
+    /// Buffer cache keyed by "sampleName:variationIndex" (e.g. "tabla:3").
+    /// Bundle samples always stored at "name:0" for backward compat.
+    private var buffers: [String: AVAudioPCMBuffer] = [:]
     private var groups: [String: LayerGroup] = [:]                  // keyed by "\(layerIdx)#\(sampleName)"
     private var synthLayers: [String: SynthLayer] = [:]             // keyed by "\(layerIdx)#\(synthName)"
     private let poolQueue = DispatchQueue(label: "com.miniengine.scheduler", qos: .userInteractive)
@@ -221,6 +225,12 @@ public final class PatternScheduler {
     public static func layerKey(layerIdx: Int, name: String) -> String {
         "\(layerIdx)#\(name)"
     }
+
+    /// Nota base de repitch de los samples LOCALES bundleados que no siguen la
+    /// convención C2 de los bancos remotos. bell.wav se sintetizó afinada a C4
+    /// (MIDI 60) y el lado Strudel la registra con note-map { c4: [...] } —
+    /// ambos motores deben transponer desde la misma referencia.
+    public static let localNoteBases: [String: Int] = ["bell": 60]
 
     // MARK: - Init
 
@@ -257,6 +267,8 @@ public final class PatternScheduler {
         var samplePairs: Set<LayerNamePair> = []
         var synthPairs:  Set<LayerNamePair> = []
         var sampleNames: Set<String>        = []
+        // Remote prefetch: (name, variationIndex) pairs for SampleBankManager
+        var remoteNames: [(name: String, index: Int)] = []
         // P0-4: map each LayerNamePair to its orbit index (first-seen wins; default 1)
         var pairOrbit:   [LayerNamePair: Int] = [:]
 
@@ -265,6 +277,7 @@ public final class PatternScheduler {
             let bankName = hap.value["bank"]?.stringValue ?? ""
             let sName    = bankName.isEmpty ? sVal : "\(bankName)_\(sVal)"
             let layerIdx = Int(hap.value["_layer"]?.doubleValue ?? 0.0)
+            let nIdx     = Int(hap.value["n"]?.doubleValue ?? 0)
             let pair     = LayerNamePair(layerIdx: layerIdx, name: sName)
             // orbit field: default = PatternScheduler.defaultOrbit (1)
             let orbitIdx = Int(hap.value["orbit"]?.doubleValue ?? Double(PatternScheduler.defaultOrbit))
@@ -274,7 +287,15 @@ public final class PatternScheduler {
             } else {
                 samplePairs.insert(pair)
                 sampleNames.insert(sName)
+                remoteNames.append((name: sName, index: nIdx))
             }
+        }
+
+        // Prefetch remoto con espera acotada: los cache-hits de disco quedan
+        // listos antes del primer ciclo; los misses de red siguen async y sus
+        // eventos se saltan hasta que llegan (timeout corto: nunca bloquea).
+        if let bm = bankManager {
+            bm.prefetchAndWait(names: remoteNames, timeout: 0.5)
         }
 
         // Build orbit buses first (before groups/layers so connections work)
@@ -397,6 +418,10 @@ public final class PatternScheduler {
             // Bug 1 fix: read _layer index (0 if not set) for per-branch chain isolation.
             let layerIdx = Int(hap.value["_layer"]?.doubleValue ?? 0.0)
 
+            // :n variation index (0 = default). Set by s("name:N") or .n("...") chain.
+            // Strudel: n selects sample variation when no scale is active.
+            let nIdx = Int(hap.value["n"]?.doubleValue ?? 0)
+
             // Event absolute time: onset of the hap's part in cycle units → seconds
             let hapCycleOnset = hap.part.begin
             let hapSeconds    = hapCycleOnset.toDouble * cycleSeconds
@@ -506,6 +531,7 @@ public final class PatternScheduler {
                 dispatchHap(
                     sampleName:    sName,
                     layerIdx:      layerIdx,
+                    variationIdx:  nIdx,
                     midiNote:      midiNote.map { Int($0) },
                     gain:          gainValue,
                     room:          roomValue,
@@ -539,6 +565,7 @@ public final class PatternScheduler {
     private func dispatchHap(
         sampleName:    String,
         layerIdx:      Int,
+        variationIdx:  Int     = 0,
         midiNote:      Int?,
         gain:          Double,
         room:          Double?,
@@ -581,14 +608,41 @@ public final class PatternScheduler {
         }
 
         guard let group = groups[chainKey],
-              let sourceBuffer = buffers[sampleName],
               let avTime = avAudioTime(forHostSeconds: absoluteTime) else { return }
 
-        // Pitch via varispeed: 2^((midi-60)/12); root = C4 = 60
-        // speed() multiplies the rate multiplicatively (documented).
+        // Resolve source buffer: prefer remote bank (with :n variation), fall back to local bundle.
+        // Buffer key: "sampleName:variationIndex" for remote; "sampleName:0" for bundle samples.
+        let sourceBuffer: AVAudioPCMBuffer
+        let repitchBase: Int
+        if let bm = bankManager,
+           let remoteBuf = bm.buffer(forName: sampleName, index: variationIdx) {
+            sourceBuffer = remoteBuf
+            repitchBase = 36   // arrays planos remotos: base C2 (convención Strudel)
+        } else if let bm = bankManager,
+                  bm.variationCount(forName: sampleName) > 0 {
+            // Remote bank knows this sample but buffer not ready yet — skip event, log once
+            print("[PatternScheduler] Remote sample not ready: \(sampleName):\(variationIdx) — skipping event")
+            return
+        } else {
+            // Los samples locales generados por el proyecto tienen su propia nota
+            // base (bell.wav está grabada en C4=60 y el lado Strudel la registra
+            // con note-map { c4: [...] }); usar 36 aquí rompería el A/B del
+            // código semilla (bell sonaría 2 octavas arriba solo en este motor).
+            repitchBase = PatternScheduler.localNoteBases[sampleName] ?? 36
+            // Fall back to bundle-bundled local sample (variation 0 only)
+            let bufKey = "\(sampleName):0"
+            guard let localBuf = buffers[bufKey] else { return }
+            sourceBuffer = localBuf
+        }
+
+        // Pitch via varispeed. Base por origen del sample:
+        //   • Bancos remotos de array plano: C2 = MIDI 36 (comportamiento observado
+        //     de Strudel con dirt-samples y documentado en strudel.cc/learn/samples).
+        //   • Samples locales: su nota base real (bell = C4, ver localNoteBases).
+        // Sin campo note → rate 1.0 (sin repitch).
         let noteRate: Double
         if let midi = midiNote {
-            noteRate = pow(2.0, Double(midi - 60) / 12.0)
+            noteRate = pow(2.0, Double(midi - repitchBase) / 12.0)
         } else {
             noteRate = 1.0
         }
@@ -973,9 +1027,14 @@ public final class PatternScheduler {
 
     private func preloadBuffers(for names: Set<String>) throws {
         for name in names {
-            if buffers[name] != nil { continue }
+            // Buffer key for local/bundle samples is "name:0" (variation 0).
+            let bufKey = "\(name):0"
+            if buffers[bufKey] != nil { continue }
             guard let url = sampleURLs[name] else {
-                print("[PatternScheduler] No URL for sample: \(name)")
+                // Not in local bundle — may be a remote sample; that's OK.
+                if bankManager == nil || bankManager?.variationCount(forName: name) == 0 {
+                    print("[PatternScheduler] No URL for sample: \(name)")
+                }
                 continue
             }
             let file = try AVAudioFile(forReading: url)
@@ -984,7 +1043,7 @@ public final class PatternScheduler {
                 frameCapacity: AVAudioFrameCount(file.length)
             ) else { continue }
             try file.read(into: buf)
-            buffers[name] = Self.normalizedBuffer(buf)
+            buffers[bufKey] = Self.normalizedBuffer(buf)
         }
     }
 

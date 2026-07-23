@@ -85,9 +85,9 @@ if [ -d "$SPM_BUNDLE" ]; then
     cp -R "$SPM_BUNDLE" "$BUNDLE_DEST"
     echo "    Copied: $(basename "$SPM_BUNDLE") → Contents/Resources/"
 else
-    echo "    WARNING: SPM bundle not found at $SPM_BUNDLE"
-    echo "    Falling back to copying Samples from source tree..."
-    cp -R "Sources/DemoStrudelApp/Samples" "$RESOURCES_DIR/"
+    echo "    ERROR: SPM bundle not found at $SPM_BUNDLE"
+    echo "           The app would crash at launch without it. Aborting."
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -115,13 +115,15 @@ else
     echo "    Using Developer ID: ${SIGN_ID}"
     # Hardened runtime required for Developer ID distribution.
     # WKWebView's JavaScript engine requires the JIT entitlement under hardened runtime.
+    # The SPM resource bundle is data-only (no Info.plist / no code) — it cannot
+    # and need not be signed separately; it gets sealed as a resource of the .app.
+    # Signing the .app signs the main executable with the entitlements.
     codesign \
         --force \
         --options runtime \
         --timestamp \
         --entitlements "$ENTITLEMENTS" \
         -s "$SIGN_ID" \
-        --deep \
         "$APP_DIR"
     echo "    Signed (Developer ID + hardened runtime + JIT): ${APP_DIR}"
     SIGNED_TYPE="Developer ID"

@@ -42,6 +42,15 @@ public struct ParseResult {
     public let pattern: ControlPattern
     /// Cycles-per-second if setcps/setcpm appeared in the code, else nil.
     public let cps: Double?
+    /// Manifest URL strings from samples('...') calls (may be "github:user/repo" or https://).
+    /// Empty if no samples() statement in code. The engine registers these before playing.
+    public let manifestURLs: [String]
+
+    public init(pattern: ControlPattern, cps: Double?, manifestURLs: [String] = []) {
+        self.pattern = pattern
+        self.cps = cps
+        self.manifestURLs = manifestURLs
+    }
 }
 
 public struct CodeParser {
@@ -57,13 +66,15 @@ public struct CodeParser {
     }
 
     /// Parse code and also return the tempo (cps) if setcps/setcpm was specified.
+    /// Also extracts samples('...') statements as manifestURLs in the result.
     public func parseWithTempo(_ rawCode: String) throws -> ParseResult {
         let lines = rawCode.components(separatedBy: .newlines)
 
         var cps: Double? = nil
+        var manifestURLs: [String] = []
         var patternLines: [String] = []
 
-        // First pass: handle setcps/setcpm and collect remaining lines
+        // First pass: handle setcps/setcpm/samples() and collect remaining lines
         for line in lines {
             let stripped = stripLineCommentsFromLine(line)
             let trimmed  = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -82,6 +93,20 @@ public struct CodeParser {
                 if let inner = extractSimpleArg(trimmed, fn: "setcpm"),
                    let v = Double(inner.trimmingCharacters(in: .whitespaces)) {
                     cps = v / 60.0
+                }
+                continue
+            }
+
+            // Detect samples('url') or samples("url") as standalone statement.
+            // Strudel convention: samples('github:tidalcycles/dirt-samples') or
+            // samples('https://bucket.../strudel.json'). May appear multiple times.
+            // The URL argument is the first argument (second form with base URL not supported here).
+            if trimmed.hasPrefix("samples(") {
+                if let inner = extractSimpleArg(trimmed, fn: "samples") {
+                    let urlStr = unquote(inner.trimmingCharacters(in: .whitespaces))
+                    if !urlStr.isEmpty {
+                        manifestURLs.append(urlStr)
+                    }
                 }
                 continue
             }
@@ -135,12 +160,12 @@ public struct CodeParser {
             }
 
             if segments.isEmpty {
-                return ParseResult(pattern: .silence, cps: cps)
+                return ParseResult(pattern: .silence, cps: cps, manifestURLs: manifestURLs)
             }
             if segments.count == 1 {
                 // Single active pattern — parse normally (parseLayerOrStack tags _layer=0)
                 let pat = try parseLayerOrStack(segments[0])
-                return ParseResult(pattern: pat, cps: cps)
+                return ParseResult(pattern: pat, cps: cps, manifestURLs: manifestURLs)
             }
             // Multiple $: segments → implicit stack; each segment is a distinct layer.
             // Re-inject _layer with the outer segment index (overriding the inner 0).
@@ -151,7 +176,7 @@ public struct CodeParser {
                 let layerVal = ControlValue.double(Double(idx))
                 return pat.map { var v = $0; v["_layer"] = layerVal; return v }
             }
-            return ParseResult(pattern: stackCP(layers), cps: cps)
+            return ParseResult(pattern: stackCP(layers), cps: cps, manifestURLs: manifestURLs)
         }
 
         // Normal (non-$:) path
@@ -159,11 +184,11 @@ public struct CodeParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !code.isEmpty else {
-            return ParseResult(pattern: .silence, cps: cps)
+            return ParseResult(pattern: .silence, cps: cps, manifestURLs: manifestURLs)
         }
 
         let pattern = try parseLayerOrStack(code)
-        return ParseResult(pattern: pattern, cps: cps)
+        return ParseResult(pattern: pattern, cps: cps, manifestURLs: manifestURLs)
     }
 
     /// Parse a code string that may be a stack(...) call or a single layer expression.
@@ -330,20 +355,29 @@ public struct CodeParser {
 
     private func stripLineCommentsFromLine(_ line: String) -> String {
         var result: [Character] = []
-        var inString = false
+        var inDoubleQuote = false
+        var inSingleQuote = false
         var i = line.startIndex
 
         while i < line.endIndex {
             let ch = line[i]
             let next = line.index(after: i)
 
-            if ch == "\"" {
-                inString.toggle()
+            if ch == "\"" && !inSingleQuote {
+                inDoubleQuote.toggle()
                 result.append(ch)
                 i = next
                 continue
             }
 
+            if ch == "'" && !inDoubleQuote {
+                inSingleQuote.toggle()
+                result.append(ch)
+                i = next
+                continue
+            }
+
+            let inString = inDoubleQuote || inSingleQuote
             if !inString && ch == "/" && next < line.endIndex && line[next] == "/" {
                 break  // rest of line is comment
             }
@@ -1277,6 +1311,14 @@ public struct CodeParser {
 
     private func unquote(_ s: String) -> String {
         var r = s.trimmingCharacters(in: .whitespaces)
+        // Strip matching outer quotes (single or double)
+        if r.hasPrefix("\"") && r.hasSuffix("\"") && r.count >= 2 {
+            return String(r.dropFirst().dropLast())
+        }
+        if r.hasPrefix("'") && r.hasSuffix("'") && r.count >= 2 {
+            return String(r.dropFirst().dropLast())
+        }
+        // Legacy: strip individually (backward compat)
         if r.hasPrefix("\"") { r = String(r.dropFirst()) }
         if r.hasSuffix("\"") { r = String(r.dropLast()) }
         return r

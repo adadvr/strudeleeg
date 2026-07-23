@@ -14,13 +14,25 @@
 - [x] COMPATIBILITY.md tabla final v1.1
 - [x] 476 tests en verde, oracle 71 fixtures / 510 haps, AudioValidate 24/24
 
+## Funcionalidad v1.2 (functionalityv1.2.md, ajustada por Adad) — ✅
+- [x] samples('github:user/repo') estilo Strudel (dirt-samples verificado: 218 entradas, branch master)
+- [x] Preparado para DO Spaces: samples('https://.../strudel.json') funciona igual (manifest _base o relativo)
+- [x] SampleBankManager: caché disco persistente (~/Library/Caches/DemoStrudel/samples), descarga perezosa + prefetch con espera acotada (cache-hits suenan desde el primer ciclo; misses async sin bloquear)
+- [x] Variaciones :n con módulo; .n() elige variación
+- [x] Nota base remota C2=36; bell local conserva C4=60 (A/B del código semilla intacto)
+- [x] Lado Strudel: samples() remoto funciona nativo en el WebView (verificado con sonda: tablas de GitHub sonando, RMS -26dBFS)
+- [x] Verificado en vivo Mini Engine: patrón de aceptación tabla/wind/sitar sonando desde GitHub; 2ª pasada sin re-descarga
+- [x] 511 tests en verde; RemoteBankLiveTests con guard de red
+- [ ] Futuro (cuando exista el bucket DO): subir samples propios + strudel.json y probar samples('https://bucket...') en ambos lados
+
 # (histórico) Tareas — newchanges.md
 
 Plan derivado de [newchanges.md](../newchanges.md). La demo A/B ([devstrudeleeg.md](../devstrudeleeg.md)) está completa; queda su verificación de oído por Adad. Borrar este archivo al terminar todo.
 
 ## Pendiente de la demo (manual, Adad)
 - [ ] Verificar de oído: código semilla suena igual en ambos lados (fixes de silencio ya aplicados)
-- [ ] Probar el .dmg en otra Mac offline
+- [x] Notarizar el DMG (perfil keychain "demostrudel-notary" con adadros@gmail.com; `bash scripts/notarize.sh` — Accepted + stapled, 2026-07-23)
+- [ ] Probar el .dmg **regenerado y notarizado** en otra Mac offline (el DMG anterior crasheaba: fix del resource bundle ya aplicado, 2026-07-23)
 
 ## Fase 0 — Fundación ✅
 - [x] Motor en su propio Swift package aislado (`MiniEngine/`)

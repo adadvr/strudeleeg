@@ -103,7 +103,7 @@ final class StrudelWebEngine: NSObject, @preconcurrency AudioDemoEngine, WKNavig
     /// file:// URL of the Samples/ folder in the resource bundle.
     private func makeSamplesBaseUrlScript() -> String? {
         guard
-            let samplesURL = Bundle.module.url(
+            let samplesURL = AppBundle.resources.url(
                 forResource: "pad",
                 withExtension: "wav",
                 subdirectory: "Samples"
@@ -120,12 +120,12 @@ final class StrudelWebEngine: NSObject, @preconcurrency AudioDemoEngine, WKNavig
     private func loadHTML() {
         guard let wv = webView else { return }
 
-        guard let bundleResourceURL = Bundle.module.resourceURL else {
-            onError?("StrudelWebEngine: Bundle.module.resourceURL is nil")
+        guard let bundleResourceURL = AppBundle.resources.resourceURL else {
+            onError?("StrudelWebEngine: resource bundle resourceURL is nil")
             return
         }
 
-        guard let indexURL = Bundle.module.url(
+        guard let indexURL = AppBundle.resources.url(
             forResource: "index",
             withExtension: "html",
             subdirectory: "StrudelWeb"
