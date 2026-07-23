@@ -592,6 +592,128 @@ const CASES = [
       return pure({ s: 'bell' }).struct(mask);
     },
   },
+
+  // ── Bug 1: [bd <hh oh>]*2 — fast(n) must advance internal slowcat cycle ────
+  // In Strudel, *2 (fast) queries the inner pattern at doubled speed.
+  // The slowcat <hh oh> has 2 alternatives; each internal cycle picks a different one.
+  // Over 2 outer cycles: bd hh bd oh | bd hh bd oh  (8 haps total)
+  {
+    label: 's("[bd <hh oh>]*2")',
+    spanCycles: 2,
+    build() {
+      const bd = pure({ s: 'bd' });
+      const hh = pure({ s: 'hh' });
+      const oh = pure({ s: 'oh' });
+      // [bd <hh oh>]*2 = fastcat(bd, slowcat(hh, oh)).fast(2)
+      return fastcat(bd, slowcat(hh, oh)).fast(2);
+    },
+  },
+
+  // ── Bug 1b: [hh hh hh <hh oh hh oh>]*2 — user's hat pattern ─────────────
+  // Slowcat has 4 alternatives; with fast(2), each outer cycle queries 2 inner
+  // cycles. Slot 3 (slowcat) cycles through hh,oh,hh,oh. Over 4 outer cycles:
+  // each outer cycle: 7×hh + 1×oh at the last slot of each repetition-2.
+  {
+    label: 's("[hh hh hh <hh oh hh oh>]*2")',
+    spanCycles: 4,
+    build() {
+      const hh = pure({ s: 'hh' });
+      const oh = pure({ s: 'oh' });
+      const sc = slowcat(hh, oh, hh, oh);
+      const grp = fastcat(hh, hh, hh, sc);
+      return grp.fast(2);
+    },
+  },
+
+  // ── Bug 2: ! inside <> expands slowcat alternatives (not steps within a slot)
+  // <0!8 3!4 0!4> = slowcat with 16 alternatives: 8×0, 4×3, 4×0.
+  // One hap per cycle; over 16 cycles: cycles 0-7 = 0, cycles 8-11 = 3, 12-15 = 0.
+  {
+    label: 'n("<0!8 3!4 0!4>")',
+    spanCycles: 16,
+    build() {
+      const zero  = pure({ n: 0 });
+      const three = pure({ n: 3 });
+      return slowcat(
+        ...Array(8).fill(zero),
+        ...Array(4).fill(three),
+        ...Array(4).fill(zero),
+      );
+    },
+  },
+
+  // ── Bug 2b: <bd*8!12 ~ [bd ~ ~ ~ bd ~ bd ~] bd*8!2>  (kick layer) ─────────
+  // 16 slowcat alternatives: 12×(bd*8), 1×silence, 1×[bd ~ ~ ~ bd ~ bd ~], 2×(bd*8)
+  // Cycles 0-11 = 8 kicks each, cycle 12 = silence, cycle 13 = kick pattern, 14-15 = 8 kicks
+  {
+    label: 's("<bd*8!12 ~ [bd ~ ~ ~ bd ~ bd ~] bd*8!2>")',
+    spanCycles: 16,
+    build() {
+      const bd  = pure({ s: 'bd' });
+      const sil = strudelSilence;
+      const bdFast8 = bd.fast(8);
+      const grp = fastcat(bd, sil, sil, sil, bd, sil, bd, sil);
+      return slowcat(
+        ...Array(12).fill(bdFast8),
+        sil,
+        grp,
+        bdFast8, bdFast8,
+      );
+    },
+  },
+
+  // ── Bug 2c: <~!2 [~ cp ~ cp]!10 ~ ~ [~ cp ~ cp]!2>  (clap/snare layer) ──
+  // 16 alternatives: 2×silence, 10×[~ cp ~ cp], 2×silence, 2×[~ cp ~ cp]
+  {
+    label: 's("<~!2 [~ cp ~ cp]!10 ~ ~ [~ cp ~ cp]!2>")',
+    spanCycles: 16,
+    build() {
+      const cp   = pure({ s: 'cp' });
+      const sil  = strudelSilence;
+      const grpCP = fastcat(sil, cp, sil, cp);
+      return slowcat(
+        sil, sil,
+        ...Array(10).fill(grpCP),
+        sil, sil,
+        grpCP, grpCP,
+      );
+    },
+  },
+
+  // ── Bug 2d: lpf("<500!4 800!4 1400!4 1000!4>") — control pattern with ! ──
+  // 16 alternatives: 4×500, 4×800, 4×1400, 4×1000 Hz.
+  // One lpf value per cycle; cycles 0-3=500, 4-7=800, 8-11=1400, 12-15=1000.
+  {
+    label: 's("sawtooth").lpf("<500!4 800!4 1400!4 1000!4>")',
+    spanCycles: 16,
+    build() {
+      const base = pure({ s: 'sawtooth' });
+      const lpfPat = slowcat(
+        ...Array(4).fill(pure({ lpf: 500  })),
+        ...Array(4).fill(pure({ lpf: 800  })),
+        ...Array(4).fill(pure({ lpf: 1400 })),
+        ...Array(4).fill(pure({ lpf: 1000 })),
+      );
+      return base.set(lpfPat);
+    },
+  },
+
+  // ── Bug 2e: n("<~!2 [0 ~ 0 3 ~ 0 ~ 5]!14>") — melody/bass layer ─────────
+  // 16 alternatives: 2×silence, 14×[0 ~ 0 3 ~ 0 ~ 5]
+  // Cycles 0-1 = silence, cycles 2-15 = 8-step bass pattern
+  {
+    label: 'n("<~!2 [0 ~ 0 3 ~ 0 ~ 5]!14>")',
+    spanCycles: 16,
+    build() {
+      const sil = strudelSilence;
+      // [0 ~ 0 3 ~ 0 ~ 5] as a pattern of {n} values
+      const bassGrp = fastcat(
+        pure({ n: 0 }), sil, pure({ n: 0 }), pure({ n: 3 }),
+        sil, pure({ n: 0 }), sil, pure({ n: 5 }),
+      );
+      return slowcat(sil, sil, ...Array(14).fill(bassGrp));
+    },
+  },
 ];
 
 // ── Query and serialize ──────────────────────────────────────────────────────

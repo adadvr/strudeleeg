@@ -96,18 +96,25 @@ public func fastcat<T>(_ patterns: [Pattern<T>]) -> Pattern<T> {
             let slotSpan  = TimeSpan(slotBegin, slotEnd)
             guard let querySpan = slotSpan.intersection(span) else { continue }
 
-            // Map the slot span back to [0,1) to query the sub-pattern
+            // Map the slot span to the sub-pattern's coordinate space.
+            // We preserve the outer cycle number (cycleN) so that time-varying
+            // sub-patterns (e.g. slowcat) advance correctly across repetitions.
+            // Mapping: t_inner = (t_outer - offset) * rN + cycleN
+            //   → a full slot [offset, offset+1/rN) maps to [cycleN, cycleN+1)
+            //   → slowcat inside the sub-pattern uses cycleN to pick its alternative
             let offset = Rational(cycleN) + Rational(i, n)
-            let mappedBegin = (querySpan.begin - offset) * rN
-            let mappedEnd   = (querySpan.end   - offset) * rN
+            let rCycleN = Rational(cycleN)
+            let mappedBegin = (querySpan.begin - offset) * rN + rCycleN
+            let mappedEnd   = (querySpan.end   - offset) * rN + rCycleN
             let mappedSpan  = TimeSpan(mappedBegin, mappedEnd)
 
             let subHaps = pat.query(mappedSpan)
 
             // Map hap times back to the slot
+            // Inverse: t_outer = (t_inner - cycleN) / rN + offset
             for hap in subHaps {
                 let mapBack: (Rational) -> Rational = { t in
-                    t / rN + offset
+                    (t - rCycleN) / rN + offset
                 }
                 let newWhole = hap.whole.map { w in
                     TimeSpan(mapBack(w.begin), mapBack(w.end))

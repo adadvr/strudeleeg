@@ -627,7 +627,8 @@ public final class PatternScheduler {
             let vowelEQ    = AVAudioUnitEQ(numberOfBands: 3)
             let panner     = AVAudioMixerNode()
 
-            // Configure EQ as low-pass, bypassed by default
+            // Configure EQ as low-pass, bypassed by default.
+            // .lowPass type has no resonance peak; bandwidth param is ignored.
             let band = eq.bands[0]
             band.filterType = .lowPass
             band.frequency  = 20_000

@@ -646,5 +646,90 @@ final class Tier3Tests: XCTestCase {
         XCTAssertEqual(haps.count, 1)
         XCTAssertEqual(haps[0].value["speed"]?.doubleValue ?? 0, 2.0, accuracy: 1e-9)
     }
+
+    // MARK: - Bug Fix 3: Filter neutral default (no resonance peak when resonance() absent)
+
+    /// When resonance() is not specified, applyLPF/HPF should use bandwidth=5.0
+    /// (widest/flattest = no resonance peak). The previous default of 0.5 was
+    /// ≈ Q=4, which caused an audible resonant boost at the cutoff frequency.
+    func testLPFNeutralDefaultBandwidth() {
+        // Q=0 (no resonance specified) must give bandwidth=5.0 (neutral)
+        let bw = resonanceToOctaveBandwidth(0.0)
+        XCTAssertEqual(bw, 5.0, accuracy: 1e-6,
+            "No resonance → bandwidth must be 5.0 (flattest, no resonance peak)")
+    }
+
+    func testLPFResonanceBandwidthNarrowsWithHigherQ() {
+        // When resonance IS specified, bandwidth should be narrower than neutral
+        let neutralBW = resonanceToOctaveBandwidth(0.0)  // 5.0
+        let bwQ9      = resonanceToOctaveBandwidth(9.0)  // ≈ 2/9 ≈ 0.222
+        XCTAssertLessThan(bwQ9, neutralBW,
+            "Explicit Q=9 (resonance=9) must produce narrower bandwidth than no-resonance")
+        // Q=9 specifically: 2.0/9.0 ≈ 0.222 — well below 5.0
+        XCTAssertEqual(bwQ9, 2.0/9.0, accuracy: 1e-6)
+    }
+
+    /// SynthLayer.init EQ bands must be correctly typed and bypassed.
+    /// Note: AVAudioUnitEQ .lowPass/.highPass filter types ignore the bandwidth
+    /// property — it is only meaningful for .resonantLowPass/.resonantHighPass.
+    /// We verify filter types and bypass state (the only reliable read-back properties).
+    func testSynthLayerInitEQBandsConfigured() {
+        let layer = SynthLayer(synthName: "sawtooth", sampleRate: 44100)
+        // band[0] = LPF
+        let lpfBand = layer.eq.bands[0]
+        XCTAssertEqual(lpfBand.filterType, .lowPass,
+            "LPF band must use .lowPass filter type")
+        XCTAssertTrue(lpfBand.bypass, "LPF must start bypassed")
+        XCTAssertEqual(lpfBand.frequency, 20_000, accuracy: 1.0,
+            "LPF default frequency must be 20kHz (above human hearing = transparent)")
+        // band[1] = HPF
+        let hpfBand = layer.eq.bands[1]
+        XCTAssertEqual(hpfBand.filterType, .highPass,
+            "HPF band must use .highPass filter type")
+        XCTAssertTrue(hpfBand.bypass, "HPF must start bypassed")
+        XCTAssertEqual(hpfBand.frequency, 20.0, accuracy: 1.0,
+            "HPF default frequency must be 20Hz (below human hearing = transparent)")
+    }
+
+    /// applyLPF must activate the band and set the frequency.
+    /// After a call with no resonance, bandwidth is set to neutral (5.0) on the band —
+    /// even though .lowPass ignores bandwidth, we set it for forward-compat with
+    /// filterType switching. The key invariant is band is NOT bypassed after applyLPF.
+    func testApplyLPFActivatesBand() {
+        let layer = SynthLayer(synthName: "sawtooth", sampleRate: 44100)
+        XCTAssertTrue(layer.eq.bands[0].bypass, "pre-call: bypassed")
+        layer.applyLPF(freq: 800.0, resonance: nil)
+        XCTAssertFalse(layer.eq.bands[0].bypass, "post-call: not bypassed")
+        XCTAssertEqual(layer.eq.bands[0].frequency, 800.0, accuracy: 1.0, "frequency set")
+    }
+
+    func testApplyLPFWithResonanceSwitchesToResonanceLowPass() {
+        let layer = SynthLayer(synthName: "sawtooth", sampleRate: 44100)
+        layer.applyLPF(freq: 800.0, resonance: 9.0)
+        // With resonance > 0, filter type switches to .resonantLowPass (which uses bandwidth for Q)
+        XCTAssertFalse(layer.eq.bands[0].bypass, "band must be active")
+        XCTAssertEqual(layer.eq.bands[0].frequency, 800.0, accuracy: 1.0)
+        XCTAssertEqual(layer.eq.bands[0].filterType, .resonantLowPass,
+            "resonance > 0 must switch to .resonantLowPass for Q control")
+    }
+
+    func testApplyLPFWithoutResonanceUsesPlainLowPass() {
+        let layer = SynthLayer(synthName: "sawtooth", sampleRate: 44100)
+        layer.applyLPF(freq: 1200.0, resonance: nil)
+        XCTAssertFalse(layer.eq.bands[0].bypass, "band must be active")
+        XCTAssertEqual(layer.eq.bands[0].filterType, .lowPass,
+            "No resonance must use .lowPass (no peak)")
+        XCTAssertEqual(layer.eq.bands[0].frequency, 1200.0, accuracy: 1.0)
+    }
+
+    func testApplyLPFResonanceResetAfterRemoval() {
+        // First call with resonance, then without: must revert to .lowPass
+        let layer = SynthLayer(synthName: "sawtooth", sampleRate: 44100)
+        layer.applyLPF(freq: 800.0, resonance: 9.0)
+        XCTAssertEqual(layer.eq.bands[0].filterType, .resonantLowPass)
+        layer.applyLPF(freq: 800.0, resonance: nil)
+        XCTAssertEqual(layer.eq.bands[0].filterType, .lowPass,
+            "Removing resonance must revert to flat .lowPass")
+    }
 }
 

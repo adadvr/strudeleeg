@@ -318,15 +318,13 @@ final class SynthLayer {
         let eqNode = AVAudioUnitEQ(numberOfBands: 2)
 
         let lpfBand = eqNode.bands[0]
-        lpfBand.filterType = .lowPass
-        lpfBand.frequency  = 20_000
-        lpfBand.bandwidth  = 0.5
+        lpfBand.filterType = .lowPass  // plain lowPass: no resonance peak by default
+        lpfBand.frequency  = 20_000   // transparent (above hearing range)
         lpfBand.bypass     = true
 
         let hpfBand = eqNode.bands[1]
-        hpfBand.filterType = .highPass
-        hpfBand.frequency  = 20.0
-        hpfBand.bandwidth  = 0.5
+        hpfBand.filterType = .highPass  // plain highPass: no resonance peak by default
+        hpfBand.frequency  = 20.0       // transparent (below hearing range)
         hpfBand.bypass     = true
 
         self.eq = eqNode
@@ -477,8 +475,15 @@ final class SynthLayer {
         let band = eq.bands[0]
         band.frequency = Float(freq)
         band.bypass    = false
-        if let q = resonance {
-            band.bandwidth = Float(resonanceToOctaveBandwidth(q))
+        if let q = resonance, q > 0 {
+            // Switch to resonantLowPass which supports bandwidth/Q control.
+            // .resonantLowPass uses bandwidth in octaves for Q control.
+            band.filterType = .resonantLowPass
+            band.bandwidth  = Float(resonanceToOctaveBandwidth(q))
+        } else {
+            // Plain lowPass: fixed-slope, no resonance peak.
+            // Reset to lowPass in case a previous call set resonantLowPass.
+            band.filterType = .lowPass
         }
     }
 
@@ -486,8 +491,13 @@ final class SynthLayer {
         let band = eq.bands[1]
         band.frequency = Float(freq)
         band.bypass    = false
-        if let q = resonance {
-            band.bandwidth = Float(resonanceToOctaveBandwidth(q))
+        if let q = resonance, q > 0 {
+            // resonantHighPass supports bandwidth/Q control.
+            band.filterType = .resonantHighPass
+            band.bandwidth  = Float(resonanceToOctaveBandwidth(q))
+        } else {
+            // Plain highPass: no resonance peak.
+            band.filterType = .highPass
         }
     }
 

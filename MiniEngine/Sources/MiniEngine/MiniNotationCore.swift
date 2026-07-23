@@ -85,7 +85,9 @@ public enum MiniNotationCore {
             case "<":
                 idx = scalars.index(after: idx)
                 var alts: [[Atom]] = []
-                // Inside <...>, each whitespace-separated atom is one alternative
+                // Inside <...>, each whitespace-separated atom is one cycle alternative.
+                // If an atom has a ! (replicate) modifier, expand it into N separate
+                // alternatives so that <a!3 b> = <a a a b> (one per cycle, not one slot).
                 while idx < scalars.endIndex && scalars[idx] != ">" {
                     // skip whitespace
                     while idx < scalars.endIndex,
@@ -94,7 +96,17 @@ public enum MiniNotationCore {
                     }
                     if idx < scalars.endIndex && scalars[idx] != ">" {
                         let atom = try parseSingleAtom(&scalars, idx: &idx)
-                        alts.append([atom])
+                        // If the atom is wrapped in .replicate, expand to N separate
+                        // alternatives instead of one multi-step alternative.
+                        // <a!3 b> → [a, a, a, b] as cycle alternatives (4 total),
+                        // not [a a a, b] (a as 3-step sequence in one cycle slot).
+                        if case .replicate(let inner, let count) = atom {
+                            for _ in 0..<count {
+                                alts.append([inner])
+                            }
+                        } else {
+                            alts.append([atom])
+                        }
                     }
                 }
                 if idx < scalars.endIndex && scalars[idx] == ">" {
@@ -280,16 +292,20 @@ public enum MiniNotationCore {
 
                 let slotDuration = item.weight / total   // fraction of a cycle
                 let offset = slotBegin
+                let rCycleN = baseOffset
 
-                // Map queried span into the sub-pattern's [0,1) coordinate
-                let mappedBegin = (querySpan.begin - offset) / slotDuration
-                let mappedEnd   = (querySpan.end   - offset) / slotDuration
+                // Map queried span into the sub-pattern's coordinate space,
+                // preserving the outer cycle number so that slowcat sub-patterns
+                // advance correctly across weighted slots.
+                // Mapping: t_inner = (t_outer - offset) / slotDuration + cycleN
+                let mappedBegin = (querySpan.begin - offset) / slotDuration + rCycleN
+                let mappedEnd   = (querySpan.end   - offset) / slotDuration + rCycleN
                 let mappedSpan  = TimeSpan(mappedBegin, mappedEnd)
 
                 let subHaps = item.pat.query(mappedSpan)
 
                 for hap in subHaps {
-                    let mapBack: (Rational) -> Rational = { t in t * slotDuration + offset }
+                    let mapBack: (Rational) -> Rational = { t in (t - rCycleN) * slotDuration + offset }
                     let newWhole = hap.whole.map { w in TimeSpan(mapBack(w.begin), mapBack(w.end)) }
                     let newPart  = TimeSpan(mapBack(hap.part.begin), mapBack(hap.part.end))
                     haps.append(Hap(whole: newWhole, part: newPart, value: hap.value))
