@@ -467,11 +467,13 @@ final class Tier4Tests: XCTestCase {
         voiceNoCrush.trigger(
             waveform: "sine", freq: 10.0, gain: 1.0,
             attack: 0.0, decay: 0.0, sustain: 1.0, release: 10.0,
-            durationSec: 1.0, sampleRate: sr, birthSample: 0, crushBits: 0.0
+            durationSec: 1.0, sampleRate: sr, birthSample: 0,
+            startHostSeconds: 0.0, crushBits: 0.0
         )
         var noCrushBuf = [Float](repeating: 0, count: frames)
         noCrushBuf.withUnsafeMutableBufferPointer { ptr in
-            voiceNoCrush.render(into: ptr.baseAddress!, frameCount: frames)
+            voiceNoCrush.render(into: ptr.baseAddress!, frameCount: frames,
+                                bufferStartSeconds: 0.0, sampleRate: sr)
         }
 
         // With crush = 3 bits
@@ -479,11 +481,13 @@ final class Tier4Tests: XCTestCase {
         voiceCrush.trigger(
             waveform: "sine", freq: 10.0, gain: 1.0,
             attack: 0.0, decay: 0.0, sustain: 1.0, release: 10.0,
-            durationSec: 1.0, sampleRate: sr, birthSample: 0, crushBits: 3.0
+            durationSec: 1.0, sampleRate: sr, birthSample: 0,
+            startHostSeconds: 0.0, crushBits: 3.0
         )
         var crushBuf = [Float](repeating: 0, count: frames)
         crushBuf.withUnsafeMutableBufferPointer { ptr in
-            voiceCrush.render(into: ptr.baseAddress!, frameCount: frames)
+            voiceCrush.render(into: ptr.baseAddress!, frameCount: frames,
+                              bufferStartSeconds: 0.0, sampleRate: sr)
         }
 
         let noCrushDistinct = Set(noCrushBuf.map { Int($0 * 100000) }).count

@@ -129,6 +129,8 @@ AVAudioSourceNode (voice pool, 8 voices)
 - Polyphony: 8-voice pool per synth type. Voice steal: LRU (oldest birth).
 - Both EQ bands are bypassed by default; activated when lpf/hpf called.
 - ADSR envelope is computed per-voice in the render block (no Apple AU needed for envelope).
+- **Sample-accurate onset (Bug 2 fix)**: Each voice stores its scheduled `startHostSeconds` (absolute host-clock time, same domain as `mach_absolute_time`). The AVAudioSourceNode render block reads `AudioTimeStamp.mHostTime` of frame 0, converts to seconds, and computes `startFrame = Int((startHostSeconds − bufferStart) × sampleRate)`. The voice renders silence for frames 0..<startFrame and audio from startFrame onward — eliminating the pre-fix up-to-lookahead (400ms) early triggering.
+- **Synth headroom (Bug 3 fix)**: A fixed factor `synthHeadroom = 0.3` is applied in the render block (`sample × gain × 0.3`). This keeps synth voices at a level that does not mask drum samples at gain(0.95). **Approximation**: the level is chosen by ear/judgment — it is NOT a bit-accurate calibration against Web Audio / Strudel's internal mix. Documented compromise.
 
 ## Resonance mapping note (Fase 3)
 

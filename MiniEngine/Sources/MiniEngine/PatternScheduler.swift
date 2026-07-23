@@ -558,21 +558,21 @@ public final class PatternScheduler {
         // Fase 4: vowel formant filter
         if let v = vowel { layer.applyVowel(v) }
 
-        // Schedule the note: voice picks up immediately.
-        // Because AVAudioSourceNode runs continuously, the voice starts producing
-        // audio as soon as trigger() is called. For accurate timing we accept
-        // up to lookahead-ms early triggering (same trade-off as sample scheduling).
-        // The note duration governs when the release starts.
+        // Bug 2 fix: pass absoluteTime (host seconds) so the voice waits until
+        // its exact scheduled frame before producing audio, eliminating the
+        // up-to-lookahead (400ms) early onset that the old immediate-trigger had.
+        // The render block derives the exact buffer frame from (absoluteTime - bufferStartSeconds).
         layer.scheduleNote(
-            freq:        freq,
-            gain:        gain,
-            attack:      attack,
-            decay:       decay,
-            sustain:     sustain,
-            release:     release,
-            durationSec: durationSec,
-            sampleRate:  sampleRate > 0 ? sampleRate : 44100.0,
-            crushBits:   crush ?? 0.0
+            freq:             freq,
+            gain:             gain,
+            attack:           attack,
+            decay:            decay,
+            sustain:          sustain,
+            release:          release,
+            durationSec:      durationSec,
+            sampleRate:       sampleRate > 0 ? sampleRate : 44100.0,
+            startHostSeconds: absoluteTime,
+            crushBits:        crush ?? 0.0
         )
     }
 

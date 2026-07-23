@@ -35,21 +35,37 @@ public final class MiniEngine {
     public func play(code: String) {
         stop()
 
+        let sched = makeScheduler(for: code)
+        guard let sched = sched else { return }
+        scheduler = sched
+        print("[MiniEngine] Playing")
+    }
+
+    /// Parse code, apply tempo, and return a configured PatternScheduler ready to play.
+    /// Returns nil (and fires onParseError) if code fails to parse.
+    /// Exposed for testing: callers can inspect sched.cps after calling this.
+    public func makeScheduler(for code: String) -> PatternScheduler? {
         let parser = CodeParser()
-        let pattern: ControlPattern
+        let result: ParseResult
         do {
-            pattern = try parser.parse(code)
+            result = try parser.parseWithTempo(code)
         } catch {
             let msg = error.localizedDescription
             print("[MiniEngine] Parse error: \(msg)")
             DispatchQueue.main.async { self.onParseError?(msg) }
-            return
+            return nil
         }
 
         let sched = PatternScheduler(audioEngine: audioEngine, sampleURLs: sampleURLs)
-        scheduler = sched
-        sched.play(pattern: pattern)
-        print("[MiniEngine] Playing")
+
+        // Bug 1 fix: apply setcps/setcpm BEFORE handing the pattern to the scheduler.
+        // parseWithTempo() returns cps=nil when no tempo statement is present (use scheduler default).
+        if let cps = result.cps {
+            sched.setcps(cps)
+        }
+
+        sched.play(pattern: result.pattern)
+        return sched
     }
 
     public func stop() {

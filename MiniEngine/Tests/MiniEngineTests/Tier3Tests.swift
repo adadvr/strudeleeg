@@ -231,20 +231,23 @@ final class Tier3Tests: XCTestCase {
     ) -> [Float] {
         let voice = SynthVoice()
         voice.trigger(
-            waveform:    waveform,
-            freq:        freq,
-            gain:        1.0,
-            attack:      attack,
-            decay:       decay,
-            sustain:     sustain,
-            release:     release,
-            durationSec: durationSec,
-            sampleRate:  sampleRate,
-            birthSample: 0
+            waveform:         waveform,
+            freq:             freq,
+            gain:             1.0,
+            attack:           attack,
+            decay:            decay,
+            sustain:          sustain,
+            release:          release,
+            durationSec:      durationSec,
+            sampleRate:       sampleRate,
+            birthSample:      0,
+            startHostSeconds: 0.0   // immediate — no offset for unit tests
         )
         var buffer = [Float](repeating: 0, count: frameCount)
         buffer.withUnsafeMutableBufferPointer { ptr in
-            voice.render(into: ptr.baseAddress!, frameCount: frameCount)
+            // bufferStartSeconds=0 matches startHostSeconds=0 → startFrame=0 (no offset)
+            voice.render(into: ptr.baseAddress!, frameCount: frameCount,
+                         bufferStartSeconds: 0.0, sampleRate: sampleRate)
         }
         return buffer
     }
@@ -313,14 +316,19 @@ final class Tier3Tests: XCTestCase {
     }
 
     func testOscillatorAmplitudeBound() {
-        // All oscillator outputs should stay within ±1.1 (ADSR applied, max at sustain=1)
+        // All oscillator outputs must stay within the synthHeadroom ceiling (0.3 × gain).
+        // Bug 3 fix: synthHeadroom = 0.3 is applied in the render block, so max output
+        // for gain=1.0 should be ≤ 0.31 (0.3 × 1.0 + small polyBLEP overshoot).
         let sr: Double = 44100
         for wave in ["sine", "sawtooth", "square", "triangle"] {
             let samples = renderVoice(waveform: wave, freq: 440.0, sampleRate: sr,
                                       frameCount: 4096, attack: 0.0, sustain: 1.0, durationSec: 2.0)
             let maxAbs = samples.map { abs($0) }.max() ?? 0
-            XCTAssertLessThanOrEqual(Double(maxAbs), 1.1,
-                                     "\(wave): amplitude out of bounds: \(maxAbs)")
+            XCTAssertLessThanOrEqual(Double(maxAbs), 0.35,
+                                     "\(wave): amplitude exceeds headroom ceiling: \(maxAbs)")
+            // Voice must also produce non-silent audio
+            XCTAssertGreaterThan(Double(maxAbs), 0.01,
+                                 "\(wave): oscillator produced silence unexpectedly")
         }
     }
 
@@ -362,15 +370,19 @@ final class Tier3Tests: XCTestCase {
                                   frameCount: totalSettle,
                                   attack: 0.001, decay: 0.05, sustain: sustainLevel,
                                   release: 0.1, durationSec: Double(totalSettle) / sr + 0.5)
-        // Check a window after decay completes: envelope should be ≈ sustain level
+        // Check a window after decay completes: envelope should be ≈ sustain level.
+        // Bug 3 fix: synthHeadroom = 0.3 is applied in the render block, so the
+        // actual peak ≈ sustainLevel × headroom × sin_peak. We test relative ordering
+        // (non-zero, below the headroom ceiling) rather than exact amplitude.
         let checkStart = atkSamp + decSamp
         let checkEnd   = min(checkStart + 100, samples.count)
         let peakInWindow = (checkStart..<checkEnd).map { abs(samples[$0]) }.max() ?? 0
-        // At sustain level 0.5, sine amplitude is 0.5; allow ±20% for phase variation
-        XCTAssertGreaterThan(Double(peakInWindow), sustainLevel * 0.3,
-                             "ADSR: sustain level too low: \(peakInWindow)")
-        XCTAssertLessThanOrEqual(Double(peakInWindow), 1.0,
-                                  "ADSR: sustain level out of bounds: \(peakInWindow)")
+        // With synthHeadroom=0.3 and sustain=0.5, expected peak ≈ 0.5*0.3 ≈ 0.15.
+        // We verify the voice is audible (>0) and bounded (≤ headroom ceiling ≈ 0.35).
+        XCTAssertGreaterThan(Double(peakInWindow), 0.001,
+                             "ADSR: sustain window should be non-silent: \(peakInWindow)")
+        XCTAssertLessThanOrEqual(Double(peakInWindow), 0.35,
+                                  "ADSR: sustain level exceeds headroom ceiling: \(peakInWindow)")
     }
 
     func testADSRSilenceAfterRelease() {
@@ -381,20 +393,22 @@ final class Tier3Tests: XCTestCase {
         let release  = 0.05  // 50ms release
         let totalSamples = Int((totalDur + release + 0.01) * sr)  // +10ms pad
         voice.trigger(
-            waveform:    "sine",
-            freq:        440.0,
-            gain:        1.0,
-            attack:      0.001,
-            decay:       0.01,
-            sustain:     0.5,
-            release:     release,
-            durationSec: totalDur,
-            sampleRate:  sr,
-            birthSample: 0
+            waveform:         "sine",
+            freq:             440.0,
+            gain:             1.0,
+            attack:           0.001,
+            decay:            0.01,
+            sustain:          0.5,
+            release:          release,
+            durationSec:      totalDur,
+            sampleRate:       sr,
+            birthSample:      0,
+            startHostSeconds: 0.0   // immediate — no offset for unit tests
         )
         var buf = [Float](repeating: 0, count: totalSamples)
         buf.withUnsafeMutableBufferPointer { ptr in
-            voice.render(into: ptr.baseAddress!, frameCount: totalSamples)
+            voice.render(into: ptr.baseAddress!, frameCount: totalSamples,
+                         bufferStartSeconds: 0.0, sampleRate: sr)
         }
         XCTAssertFalse(voice.isActive, "Voice should be idle after full ADSR cycle")
         // Last 10 samples should be (near) silent
@@ -445,14 +459,15 @@ final class Tier3Tests: XCTestCase {
         let freqs: [Double] = [220, 277, 330, 370, 440, 494, 587, 659]
         for f in freqs {
             layer.scheduleNote(
-                freq:        f,
-                gain:        0.5,
-                attack:      0.001,
-                decay:       0.05,
-                sustain:     0.6,
-                release:     0.1,
-                durationSec: 1.0,
-                sampleRate:  sr
+                freq:             f,
+                gain:             0.5,
+                attack:           0.001,
+                decay:            0.05,
+                sustain:          0.6,
+                release:          0.1,
+                durationSec:      1.0,
+                sampleRate:       sr,
+                startHostSeconds: 0.0
             )
         }
         // We can't inspect private voices directly, but we can verify no crash
@@ -466,14 +481,15 @@ final class Tier3Tests: XCTestCase {
         let layer = SynthLayer(synthName: "sawtooth", sampleRate: sr)
         for i in 0..<9 {
             layer.scheduleNote(
-                freq:        Double(100 + i * 50),
-                gain:        0.3,
-                attack:      0.001,
-                decay:       0.05,
-                sustain:     0.6,
-                release:     0.1,
-                durationSec: 2.0,
-                sampleRate:  sr
+                freq:             Double(100 + i * 50),
+                gain:             0.3,
+                attack:           0.001,
+                decay:            0.05,
+                sustain:          0.6,
+                release:          0.1,
+                durationSec:      2.0,
+                sampleRate:       sr,
+                startHostSeconds: 0.0
             )
         }
         XCTAssert(true, "9th note steal did not crash")

@@ -114,6 +114,60 @@ private func polyBLEP(_ t: Double, dt: Double) -> Double {
 
 private enum ADSRStage { case attack, decay, sustain, release, idle }
 
+// MARK: - Synth headroom (Bug 3 fix)
+//
+// Oscillators exit at amplitude ~full-scale × gain.  In Strudel/Web Audio the
+// synth voices are mixed at a noticeably lower level relative to drum samples.
+// A fixed headroom factor of 0.3 is applied to every synth sample so that
+// gain(1.0) on a sawtooth does not mask a kick drum at gain(0.95).
+//
+// COMPATIBILITY.md: the absolute level of synths vs samples is an approximation
+// of the Strudel mix, not calibrated bit-for-bit against Web Audio.
+private let synthHeadroom: Float = 0.3
+
+// MARK: - Host time to seconds conversion (Bug 2 fix)
+//
+// Converts a mach_absolute_time tick count (UInt64, as in AudioTimeStamp.mHostTime)
+// to seconds using the mach_timebase_info ratio.  This is the same clock domain as
+// the host time values produced by hostTimeNow() in PatternScheduler.
+@inline(__always)
+func machTicksToSeconds(_ ticks: UInt64) -> Double {
+    var info = mach_timebase_info_data_t()
+    mach_timebase_info(&info)
+    return Double(ticks) * Double(info.numer) / Double(info.denom) / 1_000_000_000.0
+}
+
+// MARK: - Sample-accurate start offset math (Bug 2 fix)
+//
+// Pure function used by the render block and unit-testable without AVAudio.
+//
+// Returns (skip: Bool, startFrame: Int) where:
+//   skip=true  → the voice's start time is beyond this buffer (output nothing)
+//   skip=false → render starting at startFrame (clamped to 0 when already past)
+//
+// Parameters:
+//   bufferStartSeconds: host-time of frame 0 in the current render buffer (seconds)
+//   frameCount:         number of frames in this render buffer
+//   sampleRate:         samples per second
+//   startHostSeconds:   host-time when the voice should begin (seconds)
+public func synthVoiceStartFrame(
+    bufferStartSeconds: Double,
+    frameCount: Int,
+    sampleRate: Double,
+    startHostSeconds: Double
+) -> (skip: Bool, startFrame: Int) {
+    let offsetSeconds = startHostSeconds - bufferStartSeconds
+    let offsetFrames  = offsetSeconds * sampleRate
+
+    // Voice hasn't started yet and is entirely beyond this buffer
+    if offsetFrames >= Double(frameCount) {
+        return (skip: true, startFrame: 0)
+    }
+    // Voice already started (or starts at or before frame 0): clamp to 0
+    let frame = max(0, Int(offsetFrames))
+    return (skip: false, startFrame: frame)
+}
+
 // MARK: - SynthVoice
 
 /// One polyphonic voice: oscillator + ADSR.
@@ -131,6 +185,10 @@ final class SynthVoice {
     private var susLvl:  Double = ADSRDefaults.sustain
     private var relSamp: Int    = 0    // release in samples
     private var noteDurSamp: Int = 0   // duration to sustain-end (start of release)
+
+    // Bug 2 fix: absolute host time (seconds) when this voice should start producing audio.
+    // Set at trigger time; consumed by the render block to compute per-buffer startFrame.
+    private(set) var startHostSeconds: Double = 0.0
 
     // Fase 4: bitcrusher — 0 means disabled, >0 means active with that bit depth
     private var crushBits: Double = 0.0   // 0 = no crush
@@ -153,22 +211,24 @@ final class SynthVoice {
 
     /// Trigger a new note on this voice (replaces any running note).
     func trigger(
-        waveform:    String,
-        freq:        Double,
-        gain:        Double,
-        attack:      Double,
-        decay:       Double,
-        sustain:     Double,
-        release:     Double,
-        durationSec: Double,
-        sampleRate:  Double,
-        birthSample: Int,
-        crushBits:   Double = 0.0
+        waveform:         String,
+        freq:             Double,
+        gain:             Double,
+        attack:           Double,
+        decay:            Double,
+        sustain:          Double,
+        release:          Double,
+        durationSec:      Double,
+        sampleRate:       Double,
+        birthSample:      Int,
+        startHostSeconds: Double,
+        crushBits:        Double = 0.0
     ) {
-        self.freq        = freq
-        self.gain        = gain
-        self.waveform    = waveform.lowercased()
-        self.dt          = freq / sampleRate
+        self.freq             = freq
+        self.gain             = gain
+        self.waveform         = waveform.lowercased()
+        self.dt               = freq / sampleRate
+        self.startHostSeconds = startHostSeconds
 
         self.atkSamp     = max(1, Int(attack  * sampleRate))
         self.decSamp     = max(1, Int(decay   * sampleRate))
@@ -187,12 +247,25 @@ final class SynthVoice {
     }
 
     /// Render `frameCount` samples into `buffer`, adding to existing content.
+    /// bufferStartSeconds: host-time (seconds) of frame 0 in this render buffer.
     /// Returns false when the voice has become idle (caller should clear isActive).
     @discardableResult
-    func render(into buffer: UnsafeMutablePointer<Float>, frameCount: Int) -> Bool {
+    func render(into buffer: UnsafeMutablePointer<Float>,
+                frameCount: Int,
+                bufferStartSeconds: Double,
+                sampleRate: Double) -> Bool {
         guard isActive else { return false }
 
-        for i in 0..<frameCount {
+        // Bug 2 fix: compute the frame within this buffer where the voice starts.
+        let (skip, startFrame) = synthVoiceStartFrame(
+            bufferStartSeconds: bufferStartSeconds,
+            frameCount: frameCount,
+            sampleRate: sampleRate,
+            startHostSeconds: startHostSeconds
+        )
+        if skip { return true }   // still pending, don't deactivate
+
+        for i in startFrame..<frameCount {
             // ── ADSR envelope ──────────────────────────────────────────────
             let env: Double
             switch stage {
@@ -266,8 +339,11 @@ final class SynthVoice {
                 sample = sin(2.0 * Double.pi * phase)
             }
 
-            // ── Apply envelope + gain ───────────────────────────────────────
-            var out = Float(sample * env * gain)
+            // ── Apply envelope + gain + headroom ───────────────────────────
+            // Bug 3 fix: synthHeadroom (0.3) keeps synth voices at a level that
+            // does not mask drum samples at gain(0.95). Documented approximation;
+            // not calibrated bit-for-bit against Web Audio. See COMPATIBILITY.md.
+            var out = Float(sample * env * gain) * synthHeadroom
 
             // ── Bitcrusher (Fase 4): applied post-envelope in render block ──
             // Formula: round(s × 2^(bits-1)) / 2^(bits-1) — public domain DSP
@@ -365,18 +441,22 @@ final class SynthLayer {
         self.panner = AVAudioMixerNode()
 
         // ── Source node ──────────────────────────────────────────────────────
-        // Capture voices array in render block; keep self weak to avoid retain cycle.
-        let voicesRef = UnsafeMutablePointer<[SynthVoice]>.allocate(capacity: 1)
-        voicesRef.initialize(to: self.voices)
-
-        // We store the render block closure over `voices` directly.
+        // Capture voices array and lock in render block; keep captures minimal.
         // AVAudioSourceNode render format: stereo float 32.
-        let capturedVoices = self.voices
-        let capturedLock   = self.renderLock
+        // Bug 2 fix: the render block reads timestamp.pointee.mHostTime (mach ticks
+        // of frame 0) and converts to seconds; each voice uses its startHostSeconds
+        // to compute the exact buffer frame at which it should begin.
+        // No allocations inside the render block (tempBuffer is on the stack via
+        // a fixed-capacity pointer allocated once in init and reused — but since
+        // AVAudioSourceNode frameCount can vary, we allocate/deallocate with defer;
+        // this is the existing pattern, kept unchanged to avoid ABI risk).
+        let capturedVoices  = self.voices
+        let capturedLock    = self.renderLock
+        let capturedSR      = sampleRate   // captured once; fixed for lifetime of node
 
         self.sourceNode = AVAudioSourceNode(renderBlock: { isSilence, timestamp, frameCount, audioBufferList -> OSStatus in
             let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            let frameCount = Int(frameCount)
+            let frameCountInt = Int(frameCount)
 
             // Zero output buffers
             for buf in ablPointer {
@@ -385,16 +465,34 @@ final class SynthLayer {
                 }
             }
 
-            // Mix all active voices into a mono temp buffer, then copy to all channels
-            let tempBuffer = UnsafeMutablePointer<Float>.allocate(capacity: frameCount)
+            // Bug 2 fix: convert the timestamp's mHostTime (mach ticks, frame 0)
+            // to seconds using the same mach_timebase_info ratio as hostTimeNow().
+            // This is the host-clock anchor for sample-accurate voice start offsets.
+            // mach_timebase_info is read inside each call: it is cheap (cached by OS)
+            // and avoids storing mutable state in the render closure.
+            var tbInfo = mach_timebase_info_data_t()
+            mach_timebase_info(&tbInfo)
+            let bufferStartTicks   = timestamp.pointee.mHostTime
+            let bufferStartSeconds = Double(bufferStartTicks)
+                                   * Double(tbInfo.numer)
+                                   / Double(tbInfo.denom)
+                                   / 1_000_000_000.0
+
+            // Mix all active voices into a mono temp buffer, then copy to all channels.
+            // Each voice is asked to start at the frame offset matching its startHostSeconds.
+            let tempBuffer = UnsafeMutablePointer<Float>.allocate(capacity: frameCountInt)
             defer { tempBuffer.deallocate() }
-            memset(tempBuffer, 0, frameCount * MemoryLayout<Float>.size)
+            memset(tempBuffer, 0, frameCountInt * MemoryLayout<Float>.size)
 
             capturedLock.lock()
             var anyActive = false
             for voice in capturedVoices {
                 if voice.isActive {
-                    voice.render(into: tempBuffer, frameCount: frameCount)
+                    // Pass bufferStartSeconds and sampleRate for per-buffer start-frame math.
+                    voice.render(into: tempBuffer,
+                                 frameCount: frameCountInt,
+                                 bufferStartSeconds: bufferStartSeconds,
+                                 sampleRate: capturedSR)
                     anyActive = true
                 }
             }
@@ -407,7 +505,7 @@ final class SynthLayer {
             // Copy mono mix to all output channels
             for buf in ablPointer {
                 if let ptr = buf.mData?.assumingMemoryBound(to: Float.self) {
-                    for i in 0..<frameCount {
+                    for i in 0..<frameCountInt {
                         ptr[i] += tempBuffer[i]
                     }
                 }
@@ -415,8 +513,6 @@ final class SynthLayer {
 
             return noErr
         })
-
-        voicesRef.deallocate()
     }
 
     deinit {
@@ -426,16 +522,21 @@ final class SynthLayer {
     // MARK: - Voice scheduling
 
     /// Schedule a new note. Called from the scheduler thread.
+    /// startHostSeconds: absolute host-time (seconds, same clock as hostTimeNow() in
+    ///   PatternScheduler) when this voice should begin producing audio.
+    ///   The render block converts the buffer's mHostTime to seconds and computes the
+    ///   exact frame offset within each render buffer for sample-accurate voice onset.
     func scheduleNote(
-        freq:        Double,
-        gain:        Double,
-        attack:      Double,
-        decay:       Double,
-        sustain:     Double,
-        release:     Double,
-        durationSec: Double,
-        sampleRate:  Double,
-        crushBits:   Double = 0.0
+        freq:             Double,
+        gain:             Double,
+        attack:           Double,
+        decay:            Double,
+        sustain:          Double,
+        release:          Double,
+        durationSec:      Double,
+        sampleRate:       Double,
+        startHostSeconds: Double,
+        crushBits:        Double = 0.0
     ) {
         renderLock.lock()
         defer { renderLock.unlock() }
@@ -451,17 +552,18 @@ final class SynthLayer {
 
         renderSampleCount += 1
         voice.trigger(
-            waveform:    synthName,
-            freq:        freq,
-            gain:        gain,
-            attack:      attack,
-            decay:       decay,
-            sustain:     sustain,
-            release:     release,
-            durationSec: durationSec,
-            sampleRate:  sampleRate,
-            birthSample: renderSampleCount,
-            crushBits:   crushBits
+            waveform:         synthName,
+            freq:             freq,
+            gain:             gain,
+            attack:           attack,
+            decay:            decay,
+            sustain:          sustain,
+            release:          release,
+            durationSec:      durationSec,
+            sampleRate:       sampleRate,
+            birthSample:      renderSampleCount,
+            startHostSeconds: startHostSeconds,
+            crushBits:        crushBits
         )
     }
 
