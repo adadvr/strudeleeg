@@ -60,7 +60,8 @@ let package = Package(
             path: "Sources/DemoStrudelApp",
             resources: [
                 .copy("Samples"),
-                .copy("StrudelWeb")
+                .copy("StrudelWeb"),
+                .copy("Soundfonts")
             ],
             linkerSettings: juceLinkerSettings
         ),

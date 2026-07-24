@@ -59,6 +59,9 @@ public final class SoundfontManager {
     private var inFlight: Set<String> = []
     /// Programas cuya descarga/parseo ya terminó (aunque result sea vacío)
     private var loadedPrograms: Set<Int> = []
+    /// Directorios locales donde buscar sf_{program}.js antes de ir a la red.
+    /// Típicamente el bundle de la app (Sources/DemoStrudelApp/Soundfonts/).
+    private var localDirs: [URL] = []
     /// Cola serial para todas las mutaciones de estado
     private let serialQueue = DispatchQueue(label: "com.miniengine.soundfont", qos: .userInitiated)
 
@@ -76,6 +79,15 @@ public final class SoundfontManager {
     public init() {}
 
     // MARK: - API pública
+
+    /// Registra un directorio local (p.ej. el bundle de la app) donde buscar
+    /// archivos sf_{program}.js ANTES de ir a la red o a la caché de disco.
+    /// Idempotente: si el directorio ya fue registrado, no se agrega de nuevo.
+    public func addLocalDirectory(_ url: URL) {
+        serialQueue.sync {
+            if !localDirs.contains(url) { localDirs.append(url) }
+        }
+    }
 
     /// True si el nombre corresponde a un instrumento GM (prefijo "gm_").
     public func isSoundfont(_ name: String) -> Bool {
@@ -362,10 +374,33 @@ public final class SoundfontManager {
         let urlString = Self.jsURL(forProgram: program)
         let cacheFile = Self.cacheDir.appendingPathComponent("sf_\(program).js")
 
+        // Snapshot de directorios locales para leerlo fuera de la serialQueue
+        // (evita deadlock: serialQueue.sync desde dentro de serialQueue).
+        let localDirsSnapshot: [URL] = localDirs
+
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
 
-            // Cache de disco: si el archivo ya existe, usarlo
+            // ── 1. Directorios locales (bundle) ─────────────────────────────
+            // Buscamos sf_{program}.js en cada directorio registrado antes que
+            // en la caché de disco y antes de ir a la red.
+            for dir in localDirsSnapshot {
+                let localFile = dir.appendingPathComponent("sf_\(program).js")
+                guard FileManager.default.fileExists(atPath: localFile.path),
+                      let js = try? String(contentsOf: localFile, encoding: .utf8)
+                else { continue }
+
+                let parsed = Self.parseZones(js)
+                self.serialQueue.async {
+                    self.zones[program] = parsed
+                    self.loadedPrograms.insert(program)
+                    self.inFlight.remove("\(program)")
+                    print("[SoundfontManager] Cargado local (bundle): programa \(program) (\(parsed.count) zonas)")
+                }
+                return
+            }
+
+            // ── 2. Caché de disco: si el archivo ya existe, usarlo ──────────
             if FileManager.default.fileExists(atPath: cacheFile.path),
                let js = try? String(contentsOf: cacheFile, encoding: .utf8) {
                 let parsed = Self.parseZones(js)
@@ -606,6 +641,7 @@ public final class SoundfontManager {
             decodedBuffers = [:]
             inFlight = []
             loadedPrograms = []
+            localDirs = []
         }
     }
 }

@@ -270,6 +270,14 @@ final class DemoViewModel: ObservableObject {
         self.juceEngine = je
         self.juceScheduler = JucePatternScheduler(engine: je, sampleURLs: bundleSampleURLs())
 
+        // Registrar el directorio de soundfonts bundleados para acceso offline
+        // e instantáneo (sin descarga). Se usa AppBundle.resources en lugar de
+        // Bundle.main para que funcione tanto en swift run/debug como en .app
+        // distribuido (ver AppBundle.swift — resuelve el bundle SPM correctamente).
+        if let sfDir = AppBundle.resources.url(forResource: "Soundfonts", withExtension: nil) {
+            SoundfontManager.shared.addLocalDirectory(sfDir)
+        }
+
         self.nativeEngine.onParseError = { [weak self] msg in
             Task { @MainActor in
                 self?.parseError = msg
