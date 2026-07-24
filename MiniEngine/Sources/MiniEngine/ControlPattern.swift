@@ -652,6 +652,64 @@ extension Pattern where T == [String: ControlValue] {
         }
     }
 
+    // MARK: - P3: Expresión y timing
+
+    /// late(t) — desplaza el patrón hacia DESPUÉS en el tiempo (rotR).
+    /// t en ciclos (0.25 = un cuarto de ciclo más tarde).
+    /// Semántica Strudel public: late(t) mueve los eventos t ciclos hacia el futuro.
+    public func late(_ t: Double) -> ControlPattern {
+        rotR(Rational(approximating: t))
+    }
+
+    /// early(t) — desplaza el patrón hacia ANTES en el tiempo (rotL).
+    /// t en ciclos (0.25 = un cuarto de ciclo antes).
+    /// Semántica Strudel public: early(t) mueve los eventos t ciclos hacia el pasado.
+    public func early(_ t: Double) -> ControlPattern {
+        rotL(Rational(approximating: t))
+    }
+
+    /// transpose(semitones) — transpone el campo "note" en semitones.
+    /// Si el hap no tiene campo "note" (numérico) lo deja sin cambios.
+    /// Semántica Strudel public: transpose(12) sube una octava.
+    public func transpose(_ semitones: Double) -> ControlPattern {
+        map { dict in
+            var out = dict
+            if let noteVal = dict["note"]?.doubleValue {
+                out["note"] = .double(noteVal + semitones)
+            }
+            return out
+        }
+    }
+
+    /// Overload Int para comodidad: transpose(12).
+    public func transpose(_ semitones: Int) -> ControlPattern {
+        transpose(Double(semitones))
+    }
+
+    /// velocity(v) — establece el campo "velocity" (0..1).
+    /// Se multiplica con gain en el scheduler para el gain efectivo.
+    /// v=1.0 (default) = sin cambio; v=0.5 = mitad de volumen.
+    public func velocity(_ v: Double) -> ControlPattern {
+        withControl(.pure(["velocity": .double(v)]))
+    }
+
+    /// velocity(mini) — velocity desde mini-notación.
+    public func velocity(_ mini: String) -> ControlPattern {
+        withControl(parseMini(mini).map { ["velocity": .double(Double($0) ?? 1.0)] })
+    }
+
+    /// clip(x) — recorta la duración del evento a x fracción del whole.
+    /// clip<1 = staccato (x=0.5 → dura la mitad); clip>1 = legato (sustain alargado).
+    /// Se aplica como multiplicador de durationSec en ScheduledEvent.
+    public func clip(_ x: Double) -> ControlPattern {
+        withControl(.pure(["clip": .double(x)]))
+    }
+
+    /// clip(mini) — clip desde mini-notación.
+    public func clip(_ mini: String) -> ControlPattern {
+        withControl(parseMini(mini).map { ["clip": .double(Double($0) ?? 1.0)] })
+    }
+
     // MARK: - Scale / n
 
     public func n(_ pattern: String) -> ControlPattern {

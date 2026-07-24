@@ -56,17 +56,18 @@ final class ValidatorTests: XCTestCase {
         XCTAssertGreaterThan(jsCount, 0, "Arrow function debe generar diagnóstico arbitraryJS")
     }
 
-    // MARK: - 4. clip → unsupported
+    // MARK: - 4. clip → soportado desde P3 (sin diagnóstico)
 
     func testClipUnsupported() {
+        // clip fue marcado "unsupported (P3)" hasta P2. Ahora que P3 está implementado,
+        // clip está en knownMethods y NO debe generar diagnóstico.
         let code = """
         s("bd").clip(0.5)
         """
         let diags = CodeParser().validate(code)
-        XCTAssertEqual(diags.count, 1, "clip debe generar 1 diagnóstico")
-        XCTAssertEqual(diags[0].kind, .unsupported)
-        XCTAssertEqual(diags[0].token, "clip")
-        XCTAssertEqual(diags[0].line, 1)
+        let clipDiags = diags.filter { $0.token == "clip" }
+        XCTAssertTrue(clipDiags.isEmpty,
+                      "clip ya está soportado (P3): no debe generar diagnóstico")
     }
 
     // MARK: - 5. Patrón multi-línea con stack → sin diagnósticos
@@ -113,13 +114,16 @@ final class ValidatorTests: XCTestCase {
     // MARK: - 9. Múltiples funciones no soportadas, deduplicación por línea
 
     func testMultipleUnsupportedDeduplication() {
+        // clip fue actualizado a soportado en P3; ahora solo pickOut es no soportado.
+        // Verificamos que pickOut se detecta y clip ya NO genera diagnóstico (soportado P3).
         let code = """
         note("c e g").pickOut(2).clip(0.5)
         """
         let diags = CodeParser().validate(code)
         let tokens = diags.map { $0.token }
         XCTAssertTrue(tokens.contains("pickOut"), "Debe detectar pickOut")
-        XCTAssertTrue(tokens.contains("clip"), "Debe detectar clip")
+        // clip ya está soportado (P3): no debe aparecer en diagnósticos
+        XCTAssertFalse(tokens.contains("clip"), "clip ya soportado (P3): no debe generar diagnóstico")
         // No duplicados del mismo token+línea
         let pickOutCount = diags.filter { $0.token == "pickOut" && $0.line == 1 }.count
         XCTAssertEqual(pickOutCount, 1, "pickOut en línea 1 no debe estar duplicado")

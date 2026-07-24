@@ -14,6 +14,17 @@
 - [x] COMPATIBILITY.md tabla final v1.1
 - [x] 476 tests en verde, oracle 71 fixtures / 510 haps, AudioValidate 24/24
 
+## Funcionalidad v1.3 — P3 Expresión y timing — ✅
+- [x] Mini-notación `a/n` (operator slow dentro del string): `note("c4/2")` extiende c4 sobre 2 ciclos
+- [x] `.late(t)` / `.early(t)` — desplazamiento temporal ±t ciclos (rotR/rotL)
+- [x] `.transpose(semitones)` — transpone campo "note" en semitones (overload Int)
+- [x] `.velocity(v|mini)` — campo "velocity" (multiplicador de gain, default 1.0)
+- [x] `.clip(x|mini)` — campo "clip" (fracción de durationSec: <1=staccato, >1=legato)
+- [x] ScheduledEvent: campos velocity + clip; durationSec *= clip; schedulers usan gain×velocity
+- [x] CodeParser: late/early/transpose/velocity/clip en knownMethods y parseLayerExpr
+- [x] PatternValidator: P3 quitado de suggestions (ya soportados)
+- [x] 550 tests en verde (524 previos + 26 nuevos P3); build limpio
+
 ## Funcionalidad v1.2 (functionalityv1.2.md, ajustada por Adad) — ✅
 - [x] samples('github:user/repo') estilo Strudel (dirt-samples verificado: 218 entradas, branch master)
 - [x] Preparado para DO Spaces: samples('https://.../strudel.json') funciona igual (manifest _base o relativo)

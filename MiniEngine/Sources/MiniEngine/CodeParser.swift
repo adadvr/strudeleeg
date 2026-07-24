@@ -436,7 +436,9 @@ public struct CodeParser {
         "palindrome",
         "hurry",
         "swingBy", "swing",
-        "slice", "loopAt"
+        "slice", "loopAt",
+        // P3: expresión y timing
+        "late", "early", "transpose", "velocity", "clip"
     ]
 
     // internal (no private) para que PatternValidator.swift lo consulte sin duplicar.
@@ -1027,6 +1029,40 @@ public struct CodeParser {
                     let t = arg.trimmingCharacters(in: .whitespaces)
                     if let v = parseDouble(t) { pattern = pattern.loopAt(v) }
                     else if let n = Int(t)    { pattern = pattern.loopAt(n) }
+                }
+
+            // ── P3: Expresión y timing ─────────────────────────────────────
+
+            case "late":
+                if let arg = token.arg,
+                   let v = parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.late(v)
+                }
+
+            case "early":
+                if let arg = token.arg,
+                   let v = parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.early(v)
+                }
+
+            case "transpose":
+                if let arg = token.arg,
+                   let v = parseDouble(arg.trimmingCharacters(in: .whitespaces)) {
+                    pattern = pattern.transpose(v)
+                }
+
+            case "velocity":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.velocity(v) }
+                    else                      { pattern = pattern.velocity(unquote(t)) }
+                }
+
+            case "clip":
+                if let arg = token.arg {
+                    let t = arg.trimmingCharacters(in: .whitespaces)
+                    if let v = parseDouble(t) { pattern = pattern.clip(v) }
+                    else                      { pattern = pattern.clip(unquote(t)) }
                 }
 
             default:

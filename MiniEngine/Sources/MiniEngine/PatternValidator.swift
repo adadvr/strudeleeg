@@ -43,11 +43,7 @@ extension CodeParser {
         "pickOut":      "usa `<>` para alternar secciones o `pick`",
         "pick":         "no soportado aún (P2)",
         "pickRestart":  "no soportado aún (P2)",
-        "clip":         "expresión no soportada aún (P3)",
-        "late":         "expresión no soportada aún (P3)",
-        "early":        "expresión no soportada aún (P3)",
-        "transpose":    "expresión no soportada aún (P3)",
-        "velocity":     "expresión no soportada aún (P3)",
+        // clip, late, early, transpose, velocity: ya implementados en P3 (en knownMethods)
         "chord":        "acordes por nombre no soportados aún (P4)",
         "voicing":      "acordes por nombre no soportados aún (P4)",
         "anchor":       "acordes por nombre no soportados aún (P4)",

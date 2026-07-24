@@ -48,6 +48,9 @@ public struct ScheduledEvent {
     public let hpenv:         Double
     public let postgain:      Double
     public let size:          Double?
+    // P3: expresión y timing
+    public let velocity:      Double   // multiplicador de gain (default 1.0)
+    public let clip:          Double?  // fracción de duración (nil = sin clip)
 
     /// True si el usuario fijó explícitamente algún parámetro ADSR. Cuando es
     /// false, los samples NO aplican envelope (backward-compat: mismo sonido).
@@ -90,13 +93,18 @@ public enum PatternEventExtractor {
             let hapDurationCycles = (hap.whole ?? hap.part).end.toDouble
                                   - (hap.whole ?? hap.part).begin.toDouble
 
+            // P3: clip recorta (o extiende) la duración del evento.
+            // clip<1 = staccato, clip>1 = legato, nil = duración completa.
+            let clipVal  = hap.value["clip"]?.doubleValue
+            let durationSec = hapDurationCycles * cycleSeconds * (clipVal ?? 1.0)
+
             out.append(ScheduledEvent(
                 sName:         sName,
                 layerIdx:      layerIdx,
                 variationIdx:  nIdx,
                 isSynth:       isSynthName(sName),
                 absoluteTime:  absoluteTime,
-                durationSec:   hapDurationCycles * cycleSeconds,
+                durationSec:   durationSec,
                 midiNote:      hap.value["note"]?.doubleValue,
                 gain:          hap.value["gain"]?.doubleValue ?? 1.0,
                 room:          hap.value["room"]?.doubleValue,
@@ -125,7 +133,9 @@ public enum PatternEventExtractor {
                 lpenv:         hap.value["lpenv"]?.doubleValue ?? 0.0,
                 hpenv:         hap.value["hpenv"]?.doubleValue ?? 0.0,
                 postgain:      hap.value["postgain"]?.doubleValue ?? 1.0,
-                size:          hap.value["size"]?.doubleValue
+                size:          hap.value["size"]?.doubleValue,
+                velocity:      hap.value["velocity"]?.doubleValue ?? 1.0,
+                clip:          clipVal
             ))
         }
         return out

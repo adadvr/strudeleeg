@@ -888,3 +888,16 @@ Detección:
 - **JavaScript arbitrario**: líneas que empiezan con `const`/`let`/`var`/`function`, contienen `=>` o `register(`. El motor es un parser de mini-notación + scheduler, **no** un intérprete JS (ver "techo de la arquitectura" en functionalityv1.3.md).
 
 La UI (paneles Mini Engine / JUCE) muestra los diagnósticos como aviso legible sin impedir la reproducción — el motor toca lo que sí soporta.
+
+---
+
+## Expresión y timing (v1.3 · P3)
+
+| Función | Estado | Notas |
+|---|---|---|
+| `clip(x)` | ✅ nativo | Recorta/extiende la duración de la nota (staccato ↔ legato). `durationSec` del evento se multiplica por `x`. `x<1` = staccato, `x>1` = legato. Patroneable |
+| `late(t)` | ✅ nativo | Desplaza el evento MÁS TARDE `t` ciclos (`rotR`). Groove/humanización |
+| `early(t)` | ✅ nativo | Desplaza el evento MÁS TEMPRANO `t` ciclos (`rotL`) |
+| `transpose(n)` | ✅ nativo | Transpone `n` semitonos (suma al campo `note`). Overload Int y Double |
+| `velocity(x)` | ✅ nativo | Intensidad de la nota, distinta de `gain`. El gain efectivo = `gain × velocity` en ambos backends. Patroneable |
+| Mini `a/n` | ✅ nativo | Operador **slow** dentro del string (inverso de `a*n`). `a/2` extiende el paso sobre 2 ciclos |

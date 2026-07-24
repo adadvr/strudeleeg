@@ -178,6 +178,9 @@ final class JucePatternScheduler {
         for ev in events {
             let delay = max(0, ev.absoluteTime - now)
 
+            // P3: gain efectivo = gain × velocity (velocity=1.0 por defecto = sin cambio).
+            let effectiveGain = ev.gain * ev.velocity
+
             // FX de orbit (last event wins): room/size → reverb, delay → delay bus.
             if ev.room != nil || ev.size != nil || ev.delay != nil {
                 engine.setOrbitFX(
@@ -196,7 +199,7 @@ final class JucePatternScheduler {
                     delaySeconds: delay,
                     waveform:     ev.sName,
                     freq:         synthFrequency(midi: midi),
-                    gain:         ev.gain,
+                    gain:         effectiveGain,
                     attack:       ev.attack   ?? ADSRDefaults.attack,
                     decay:        ev.decay    ?? ADSRDefaults.decay,
                     sustain:      ev.sustain  ?? ADSRDefaults.sustain,
@@ -245,7 +248,7 @@ final class JucePatternScheduler {
                     delaySeconds: delay,
                     key:          key,
                     playbackRatio: ratio,
-                    gain:         ev.gain,
+                    gain:         effectiveGain,
                     postgain:     ev.postgain,
                     beginFrac:    ev.begin ?? -1,
                     endFrac:      ev.end   ?? -1,

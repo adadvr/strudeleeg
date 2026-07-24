@@ -443,12 +443,15 @@ public final class PatternScheduler {
                          atHostSeconds: ev.absoluteTime)
         }
 
+        // P3: gain efectivo = gain × velocity (velocity=1.0 por defecto = sin cambio).
+        let effectiveGain = ev.gain * ev.velocity
+
         if ev.isSynth {
             dispatchSynthHap(
                 synthName:    ev.sName,
                 layerIdx:     ev.layerIdx,
                 midiNote:     ev.midiNote ?? Double(synthDefaultMIDI),
-                gain:         ev.gain,
+                gain:         effectiveGain,
                 lpf:          ev.cutoff,
                 hpf:          ev.hpf,
                 resonance:    ev.resonance,
@@ -476,7 +479,7 @@ public final class PatternScheduler {
                 layerIdx:      ev.layerIdx,
                 variationIdx:  ev.variationIdx,
                 midiNote:      ev.midiNote.map { Int($0) },
-                gain:          ev.gain,
+                gain:          effectiveGain,
                 room:          ev.room,
                 cutoff:        ev.cutoff,
                 hpf:           ev.hpf,             // P0-3: per-event HPF

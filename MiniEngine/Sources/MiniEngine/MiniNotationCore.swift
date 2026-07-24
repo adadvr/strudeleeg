@@ -44,6 +44,7 @@ public enum MiniNotationCore {
         case polymeter([[Atom]], Int?)  // {a b, c d e}%n — polymeter (each branch own step count)
         // Modifier wrappers (set after parsing base atom)
         case fast(Atom, Int)        // a*n  — play n times faster (subdivide)
+        case slow(Atom, Int)        // a/n  — play n times slower (extender sobre n ciclos)
         case replicate(Atom, Int)   // a!n  — repeat as n equal steps
         case weight(Atom, Int)      // a@w  — this step has weight w
         case degrade(Atom, Double)  // a?p  — random omission with probability p
@@ -219,6 +220,11 @@ public enum MiniNotationCore {
                 idx = scalars.index(after: idx)
                 let n = parseOptionalInt(&scalars, idx: &idx) ?? 2
                 atom = .fast(atom, n)
+            case "/":
+                // a/n → extender el atom sobre n ciclos (inverso de a*n)
+                idx = scalars.index(after: idx)
+                let n = parseOptionalInt(&scalars, idx: &idx) ?? 2
+                atom = .slow(atom, n)
             case "!":
                 idx = scalars.index(after: idx)
                 let n = parseOptionalInt(&scalars, idx: &idx) ?? 2
@@ -329,7 +335,7 @@ public enum MiniNotationCore {
     }
 
     private static func isWordChar(_ c: Unicode.Scalar) -> Bool {
-        let prohibited: Set<Unicode.Scalar> = [" ", "\t", "\n", "\r", "[", "]", "<", ">", "{", "}", ",", "*", "!", "@", "?"]
+        let prohibited: Set<Unicode.Scalar> = [" ", "\t", "\n", "\r", "[", "]", "<", ">", "{", "}", ",", "*", "!", "@", "?", "/"]
         return !prohibited.contains(c)
     }
 
@@ -372,6 +378,7 @@ public enum MiniNotationCore {
             // Replicate n copies — no weight wrapper needed, they're equal steps
             return Array(repeating: inner, count: n)
         }
+        // .slow pasa sin expandir (se convierte directamente en atomToPattern)
         return [atom]
     }
 
@@ -448,6 +455,9 @@ public enum MiniNotationCore {
         case .fast(let inner, let n):
             // a*n → play the inner pattern n times faster (subdivide into n)
             return atomToPattern(inner).fast(n)
+        case .slow(let inner, let n):
+            // a/n → extender el pattern sobre n ciclos (inverso de a*n)
+            return atomToPattern(inner).slow(n)
         case .replicate(let inner, _):
             // Replicates are expanded before reaching here; handle defensively
             return atomToPattern(inner)
