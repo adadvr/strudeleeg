@@ -915,3 +915,13 @@ La UI (paneles Mini Engine / JUCE) muestra los diagnósticos como aviso legible 
 | Patrones etiquetados `nombre:` | ✅ nativo | `drm: s("bd")`, `bass: note("c2")` en líneas — equivalen a `$:` con etiqueta (se apilan). Variante muteada `_nombre:` se ignora |
 
 `pick` + `@` (pesos en el índice) es la técnica para estructurar canciones: un índice largo elige qué sección suena en cada compás.
+
+---
+
+## Sistema de acordes (v1.3 · P4)
+
+| Función | Estado | Notas |
+|---|---|---|
+| `chord("Am")` | ✅ nativo | Acorde por nombre → stack de notas simultáneas (campo `note`). Fundamental en octava base 3. 18 calidades: mayor, `m`/`min`, `7`, `maj7`/`M7`, `m7`/`min7`, `dim`/`o`, `dim7`, `m7b5`/`ø`, `aug`/`+`, `sus2`, `sus4`/`sus`, `6`, `m6`, `9`, `maj9`, `m9`, `add9`. Símbolo inválido → silencio (no crashea). Mini-notación: `chord("<Am E Dm G>")` |
+| `.voicing()` | ✅ nativo | Re-dispone las notas del acorde cerca del registro ancla (default `c5`=72): pitch classes ascendentes colocadas en la octava más cercana. Determinista |
+| `.anchor("g5")` | ✅ nativo | Registro de referencia para el voicing (ej. `g5`=MIDI 79) |

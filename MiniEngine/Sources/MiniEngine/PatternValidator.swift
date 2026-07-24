@@ -37,17 +37,16 @@ extension CodeParser {
         // señales continuas como base
         "sine", "saw", "isaw", "tri", "square", "cosine", "rand", "perlin",
         // P2: funciones de estructura de canción usadas como base (no como métodos)
-        "pick", "pickOut", "pickRestart", "indexPattern"
+        "pick", "pickOut", "pickRestart", "indexPattern",
+        // P4: chord como base
+        "chord"
     ]
 
     // Sugerencias para casos conocidos
-    private static let suggestions: [String: String] = [
-        // clip, late, early, transpose, velocity: ya implementados en P3 (en knownMethods)
-        "chord":        "acordes por nombre no soportados aún (P4)",
-        "voicing":      "acordes por nombre no soportados aún (P4)",
-        "anchor":       "acordes por nombre no soportados aún (P4)"
-        // pick, pickOut, pickRestart, layer: soportados en P2 (en knownMethods y recognizedBase)
-    ]
+    // chord/voicing/anchor fueron removidos — ya están implementados en P4 (knownMethods)
+    // clip, late, early, transpose, velocity: ya implementados en P3
+    // pick, pickOut, pickRestart, layer: soportados en P2
+    private static let suggestions: [String: String] = [:]
 
     /// Valida el código de patrón y devuelve una lista de diagnósticos.
     /// Nunca lanza ni crashea — todo error interno queda silenciado.

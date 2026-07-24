@@ -459,7 +459,9 @@ public struct CodeParser {
         // P3: expresión y timing
         "late", "early", "transpose", "velocity", "clip",
         // P2: estructura de canción
-        "pick", "pickOut", "pickRestart", "layer"
+        "pick", "pickOut", "pickRestart", "layer",
+        // P4: acordes por nombre
+        "chord", "voicing", "anchor"
     ]
 
     // internal (no private) para que PatternValidator.swift lo consulte sin duplicar.
@@ -518,8 +520,13 @@ public struct CodeParser {
             base = base?.withControl(nPat) ?? nPat
         }
 
+        // chord("...") — progresión de acordes por nombre (P4)
+        if let chordToken = chain.first(where: { $0.name == "chord" }), let chordArg = chordToken.arg {
+            base = chord(unquote(chordArg))
+        }
+
         guard var pattern = base else {
-            throw CodeParseError.syntaxError("Layer must start with s(...), note(...), n(...), pick(...), pickOut(...), or pickRestart(...): \(expr)")
+            throw CodeParseError.syntaxError("Layer must start with s(...), note(...), n(...), chord(...), pick(...), pickOut(...), or pickRestart(...): \(expr)")
         }
 
         // ── Effect / control modifiers (in chain order) ─────────────────────
@@ -1117,6 +1124,19 @@ public struct CodeParser {
                     let t = arg.trimmingCharacters(in: .whitespaces)
                     if let v = parseDouble(t) { pattern = pattern.clip(v) }
                     else                      { pattern = pattern.clip(unquote(t)) }
+                }
+
+            // ── P4: acordes por nombre ─────────────────────────────────────
+
+            case "voicing":
+                // voicing() no tiene argumentos
+                pattern = pattern.voicing()
+
+            case "anchor":
+                // anchor("g5") — fija el registro de referencia para voicing()
+                if let arg = token.arg {
+                    let t = unquote(arg.trimmingCharacters(in: .whitespaces))
+                    pattern = pattern.anchor(t)
                 }
 
             default:

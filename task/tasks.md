@@ -1,5 +1,16 @@
 # Tareas — Mini Engine grado producción
 
+## Funcionalidad v1.4 — P4 Sistema de acordes — ✅
+- [x] Chords.swift: qualityIntervals (18 calidades), parseChordSymbol, chord() constructor
+- [x] chord("Am") → 3 haps simultáneos con campo "note" MIDI (A3=57, C4=60, E4=64)
+- [x] chord("<Am E Dm G>") → progresión por slowcat (slowcat semántico de MiniNotationCore)
+- [x] .anchor("g5") → inyecta campo _anchor=MIDI en cada hap
+- [x] .voicing() → re-disposición compacta cerca del ancla (default c5=72); elimina _anchor
+- [x] CodeParser: chord(...) como BASE; voicing()/anchor() como modificadores
+- [x] PatternValidator: chord/voicing/anchor en knownMethods y recognizedBase → no se reportan
+- [x] ChordsTests.swift: 30 tests (tabla, notas, progresión, voicing, anchor, parser, validador)
+- [x] 605 tests totales en verde (575 previos + 30 nuevos); build limpio
+
 ## Funcionalidad v1.1 (functionalityv1.1.md) — ✅ COMPLETA
 - [x] P0-1 Acordes con coma
 - [x] P0-2 Señales continuas: signal(), sine/saw/isaw/tri/square/cosine/rand/perlin + range/rangex/segment
