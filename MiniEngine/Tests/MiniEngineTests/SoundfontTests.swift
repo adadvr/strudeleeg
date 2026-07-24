@@ -297,3 +297,50 @@ final class SoundfontLiveTests: XCTestCase {
         print("[SoundfontLiveTests] midi=60 → rootMidi=\(rootMidi), frames=\(buf.frameLength)")
     }
 }
+
+/// Verifica la carga OFFLINE desde el set bundleado local (Sources/DemoStrudelApp/Soundfonts).
+/// Prueba que un MP3 del set curado se decodifica a un buffer válido SIN red — que es
+/// exactamente lo que hace el Mini Engine al reproducir un gm_ con el bundle presente.
+final class SoundfontLocalBundleTests: XCTestCase {
+
+    /// Ruta al directorio de soundfonts bundleados, derivada de la ubicación de este archivo.
+    /// repo/MiniEngine/Tests/MiniEngineTests/SoundfontTests.swift → repo/Sources/DemoStrudelApp/Soundfonts
+    private func localSoundfontsDir() -> URL {
+        var dir = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { dir = dir.deletingLastPathComponent() }  // → repo root
+        return dir.appendingPathComponent("Sources/DemoStrudelApp/Soundfonts", isDirectory: true)
+    }
+
+    /// gm_electric_piano_1 (programa 4 = sf_4.js del set curado) se carga y decodifica
+    /// desde el directorio local, sin tocar la red.
+    func testLocalBundleLoadsAndDecodes() throws {
+        let dir = localSoundfontsDir()
+        let file = dir.appendingPathComponent("sf_4.js")
+        try XCTSkipUnless(
+            FileManager.default.fileExists(atPath: file.path),
+            "sf_4.js no está en el set local — correr scripts/fetch_soundfonts.sh"
+        )
+
+        let sfm = SoundfontManager.shared
+        sfm.clear()
+        sfm.addLocalDirectory(dir)   // preferir el bundle local antes que la red
+
+        // El parseo del .js local es rápido; la decodificación del MP3 es async → poll acotado.
+        var result: (buffer: AVAudioPCMBuffer, rootMidi: Int)?
+        let deadline = Date().addingTimeInterval(10.0)
+        while Date() < deadline {
+            result = sfm.resolve(name: "gm_electric_piano_1", midi: 60)
+            if result != nil { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        guard let (buf, rootMidi) = result else {
+            XCTFail("resolve devolvió nil — el MP3 del set local no se decodificó en el Mini Engine")
+            return
+        }
+        XCTAssertGreaterThan(buf.frameLength, 0, "El buffer decodificado del MP3 local debe tener frames")
+        XCTAssertGreaterThanOrEqual(rootMidi, 0)
+        XCTAssertLessThanOrEqual(rootMidi, 127)
+        print("[SoundfontLocalBundleTests] LOCAL midi=60 → rootMidi=\(rootMidi), frames=\(buf.frameLength)")
+    }
+}
