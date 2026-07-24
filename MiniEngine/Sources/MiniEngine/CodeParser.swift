@@ -114,6 +114,25 @@ public struct CodeParser {
             patternLines.append(stripped)
         }
 
+        // Normalización: líneas con etiqueta `IDENT:` o `_IDENT:` al inicio de línea física
+        // se convierten a `$:` o `_$:` respectivamente (etiqueta solo documenta, se descarta).
+        // Forma activa:   `drm: s("bd*4")`  →  `$: s("bd*4")`
+        // Forma muteada:  `_bass: note("c")` →  `_$: note("c")`
+        // NOTA: se detecta solo al inicio de línea (tras trim). No afecta strings ni contenido
+        // embebido. No confundir con `$:` ya existente (prefijo diferente).
+        patternLines = patternLines.map { line in
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Forma muteada: _IDENT: (guión bajo + identificador + dos puntos)
+            if let muteMatch = matchLabeledLine(t, muted: true) {
+                return "_$: " + muteMatch
+            }
+            // Forma activa: IDENT: (identificador + dos puntos, sin guión bajo inicial)
+            if let activeMatch = matchLabeledLine(t, muted: false) {
+                return "$: " + activeMatch
+            }
+            return line
+        }
+
         // Detect $: top-level parallel pattern syntax.
         // Lines starting with "$:" each define one pattern; "_$:" lines are muted (ignored).
         // A pattern body may span multiple physical lines until the next $:/_$: line.
@@ -438,7 +457,9 @@ public struct CodeParser {
         "swingBy", "swing",
         "slice", "loopAt",
         // P3: expresión y timing
-        "late", "early", "transpose", "velocity", "clip"
+        "late", "early", "transpose", "velocity", "clip",
+        // P2: estructura de canción
+        "pick", "pickOut", "pickRestart", "layer"
     ]
 
     // internal (no private) para que PatternValidator.swift lo consulte sin duplicar.
@@ -447,6 +468,23 @@ public struct CodeParser {
     ]
 
     private func parseLayerExpr(_ expr: String) throws -> ControlPattern {
+        // ── Detección anticipada: pick / pickOut / pickRestart como BASE ──────
+        // Estas funciones son top-level (no métodos encadenados) y producen un ControlPattern.
+        // Forma: pick("<0 1>", [s("bd"), s("hh")])
+        // splitTopLevelCommas respeta `[]` (incrementa depth), así el array interno
+        // llega como un solo token: "[s(\"bd\"), s(\"hh\")]".
+        let trimmedExpr = expr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedExpr.hasPrefix("pick(") || trimmedExpr.hasPrefix("pickOut(") || trimmedExpr.hasPrefix("pickRestart(") {
+            let fnName: String
+            if trimmedExpr.hasPrefix("pickRestart(") { fnName = "pickRestart" }
+            else if trimmedExpr.hasPrefix("pickOut(")    { fnName = "pickOut" }
+            else                                          { fnName = "pick" }
+
+            if let pickPat = try? parsePickExpr(trimmedExpr, function: fnName) {
+                return pickPat
+            }
+        }
+
         let chain = try parseMethodChain(expr)
 
         guard !chain.isEmpty else {
@@ -481,7 +519,7 @@ public struct CodeParser {
         }
 
         guard var pattern = base else {
-            throw CodeParseError.syntaxError("Layer must start with s(...), note(...), or n(...): \(expr)")
+            throw CodeParseError.syntaxError("Layer must start with s(...), note(...), n(...), pick(...), pickOut(...), or pickRestart(...): \(expr)")
         }
 
         // ── Effect / control modifiers (in chain order) ─────────────────────
@@ -1031,6 +1069,22 @@ public struct CodeParser {
                     else if let n = Int(t)    { pattern = pattern.loopAt(n) }
                 }
 
+            // ── P2: layer([f1, f2, ...]) ───────────────────────────────────
+            // layer(x=>x.fast(2), x=>x.rev) — apila transformaciones paralelas sobre sí mismo.
+            // El argumento es una lista de lambdas separadas por comas top-level.
+            case "layer":
+                if let arg = token.arg {
+                    let lambdaParts = splitTopLevelCommas(arg)
+                    let lambdas: [(ControlPattern) -> ControlPattern] = lambdaParts.compactMap { part in
+                        parseLambda(part.trimmingCharacters(in: .whitespacesAndNewlines))
+                    }
+                    if !lambdas.isEmpty {
+                        pattern = pattern.layer(lambdas)
+                    } else {
+                        print("[CodeParser] 'layer' no pudo parsear ninguna lambda en: \(arg)")
+                    }
+                }
+
             // ── P3: Expresión y timing ─────────────────────────────────────
 
             case "late":
@@ -1252,6 +1306,63 @@ public struct CodeParser {
         throw CodeParseError.syntaxError("Unmatched '(' in expression")
     }
 
+    // MARK: - pick / pickOut / pickRestart parser
+
+    /// Parsea una expresión pick/pickOut/pickRestart y devuelve el ControlPattern resultante.
+    ///
+    /// Forma soportada:
+    ///   pick("<0 1>", [s("bd"), note("c e g"), s("hh*8")])
+    ///
+    /// splitTopLevelCommas respeta `[]` (incrementa depth para '[' y ']'),
+    /// así el array llega como un único token "[s(...), ...]" que se procesa aparte.
+    ///
+    /// Algoritmo:
+    ///   1. Extraer los args de la función usando extractArgs.
+    ///   2. Dividir por comas top-level → [argIdx, argArray] (2 partes).
+    ///   3. argIdx: string quoted → indexPattern(unquote(...)).
+    ///   4. argArray: quitar los corchetes exteriores → dividir por comas top-level
+    ///                → parsear cada elemento con parseLayerExpr.
+    ///   5. Construir pick/pickOut/pickRestart(idx, pats).
+    private func parsePickExpr(_ expr: String, function fnName: String) throws -> ControlPattern {
+        let inner = try extractArgs(expr, function: fnName)
+        let topParts = splitTopLevelCommas(inner)
+
+        guard topParts.count >= 2 else {
+            throw CodeParseError.syntaxError("\(fnName) requiere al menos 2 argumentos: índice y array de patrones")
+        }
+
+        // Primer argumento: el patrón de índice (mini-notación entre comillas)
+        let idxStr = topParts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        let idxMini = unquote(idxStr)
+        let idx = indexPattern(idxMini)
+
+        // Segundo argumento: el array de patrones [ expr0, expr1, ... ]
+        // splitTopLevelCommas respeta [], así que topParts[1] contiene el array completo.
+        var arrayStr = topParts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Quitar los corchetes exteriores [ ... ]
+        if arrayStr.hasPrefix("[") && arrayStr.hasSuffix("]") {
+            arrayStr = String(arrayStr.dropFirst().dropLast())
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Dividir los elementos del array por comas top-level
+        let elemParts = splitTopLevelCommas(arrayStr)
+        let pats: [ControlPattern] = try elemParts.map { elem in
+            try parseLayerExpr(elem.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        guard !pats.isEmpty else {
+            throw CodeParseError.syntaxError("\(fnName) requiere al menos 1 patrón en el array")
+        }
+
+        switch fnName {
+        case "pickRestart": return pickRestart(idx, pats)
+        case "pickOut":     return pickOut(idx, pats)
+        default:            return pick(idx, pats)
+        }
+    }
+
     // MARK: - add() argument parser
     //
     // Parses the argument to .add(...):
@@ -1290,6 +1401,49 @@ public struct CodeParser {
     }
 
     // MARK: - Helpers
+
+    /// Detecta si una línea (ya trimeada) comienza con un identificador etiquetado.
+    ///
+    /// Para `muted: false`: detecta `IDENT:` → devuelve el cuerpo tras los dos puntos.
+    /// Para `muted: true`:  detecta `_IDENT:` → devuelve el cuerpo tras los dos puntos.
+    ///
+    /// Reglas:
+    ///   - No confundir con `$:` o `_$:` (ya manejados arriba; contienen `$` que no es letra).
+    ///   - El identificador debe empezar por letra ASCII o `_` (para muted: sin `_` inicial).
+    ///   - El cuerpo puede estar vacío (continuación en línea siguiente).
+    ///   - Devuelve `nil` si la línea no sigue el patrón.
+    private func matchLabeledLine(_ t: String, muted: Bool) -> String? {
+        // Evitar re-normalizar líneas ya normalizadas
+        if t.hasPrefix("$:") || t.hasPrefix("_$:") { return nil }
+
+        let startIdx: String.Index
+        if muted {
+            // _IDENT: — debe empezar por _ seguido de letra
+            guard t.hasPrefix("_") else { return nil }
+            let afterUnderscore = t.index(after: t.startIndex)
+            guard afterUnderscore < t.endIndex else { return nil }
+            let nextCh = t[afterUnderscore]
+            guard nextCh.isLetter else { return nil }   // no es `_$:` porque `$` no es letra
+            startIdx = t.startIndex
+        } else {
+            // IDENT: — debe empezar por letra ASCII (no `_` para no colisionar con `_$:`)
+            guard let first = t.first, first.isLetter else { return nil }
+            startIdx = t.startIndex
+        }
+
+        // Leer el identificador (letras, dígitos, guión bajo)
+        var idx = startIdx
+        if muted { idx = t.index(after: idx) }  // saltar el `_` inicial
+        while idx < t.endIndex && (t[idx].isLetter || t[idx].isNumber || t[idx] == "_") {
+            idx = t.index(after: idx)
+        }
+
+        // Debe seguir `:` inmediatamente
+        guard idx < t.endIndex && t[idx] == ":" else { return nil }
+        let bodyStart = t.index(after: idx)
+        let body = String(t[bodyStart...]).trimmingCharacters(in: .whitespaces)
+        return body
+    }
 
     private func extractSimpleArg(_ code: String, fn: String) -> String? {
         let prefix = "\(fn)("

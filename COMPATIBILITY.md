@@ -901,3 +901,17 @@ La UI (paneles Mini Engine / JUCE) muestra los diagnósticos como aviso legible 
 | `transpose(n)` | ✅ nativo | Transpone `n` semitonos (suma al campo `note`). Overload Int y Double |
 | `velocity(x)` | ✅ nativo | Intensidad de la nota, distinta de `gain`. El gain efectivo = `gain × velocity` en ambos backends. Patroneable |
 | Mini `a/n` | ✅ nativo | Operador **slow** dentro del string (inverso de `a*n`). `a/2` extiende el paso sobre 2 ciclos |
+
+---
+
+## Estructura de canción (v1.3 · P2)
+
+| Función | Estado | Notas |
+|---|---|---|
+| `pick(idx, [p0, p1, …])` | ✅ nativo | Un índice patroneado selecciona qué patrón suena. innerJoin: el patrón elegido corre en tiempo absoluto (no reinicia). Índice fuera de rango → wrap modular. `idx` desde mini-notación via `indexPattern("<0 1 2>")` |
+| `pickOut(...)` | ✅ nativo | Alias de `pick` (no reinicia el patrón elegido) |
+| `pickRestart(...)` | ✅ nativo | Variante que **reinicia** el patrón elegido en el onset de cada slot del índice |
+| `.layer(f1, f2, …)` | ✅ nativo | Aplica varias transformaciones en paralelo y apila: `self.layer([f1,f2]) == stack([f1(self), f2(self)])`. En código: `.layer(x=>x.fast(2), x=>x.rev)` |
+| Patrones etiquetados `nombre:` | ✅ nativo | `drm: s("bd")`, `bass: note("c2")` en líneas — equivalen a `$:` con etiqueta (se apilan). Variante muteada `_nombre:` se ignora |
+
+`pick` + `@` (pesos en el índice) es la técnica para estructurar canciones: un índice largo elige qué sección suena en cada compás.

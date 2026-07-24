@@ -23,20 +23,18 @@ final class ValidatorTests: XCTestCase {
         XCTAssertEqual(diags, [], "Patrón simple soportado no debe generar diagnósticos")
     }
 
-    // MARK: - 2. pickOut → unsupported con suggestion
+    // MARK: - 2. pickOut → soportado desde P2 (sin diagnóstico)
 
     func testPickOutUnsupported() {
+        // pickOut fue marcado como unsupported antes de P2. Ahora está implementado
+        // en knownMethods y recognizedBase — no debe generar diagnóstico.
         let code = """
-        note("c e g").pickOut(2)
+        pickOut("<0 1>", [s("bd"), s("hh")])
         """
         let diags = CodeParser().validate(code)
-        XCTAssertEqual(diags.count, 1, "Debe haber exactamente 1 diagnóstico para pickOut")
-
-        let diag = diags[0]
-        XCTAssertEqual(diag.kind, .unsupported)
-        XCTAssertEqual(diag.token, "pickOut")
-        XCTAssertNotNil(diag.suggestion, "pickOut debe tener sugerencia")
-        XCTAssertEqual(diag.line, 1)
+        let pickOutDiags = diags.filter { $0.token == "pickOut" }
+        XCTAssertTrue(pickOutDiags.isEmpty,
+                      "pickOut ya está soportado (P2): no debe generar diagnóstico")
     }
 
     // MARK: - 3. JavaScript arbitrario
@@ -111,36 +109,33 @@ final class ValidatorTests: XCTestCase {
         XCTAssertEqual(diags, [], "Líneas de comentario no deben generar diagnósticos")
     }
 
-    // MARK: - 9. Múltiples funciones no soportadas, deduplicación por línea
+    // MARK: - 9. pick, pickOut, clip soportados desde P2/P3
 
     func testMultipleUnsupportedDeduplication() {
-        // clip fue actualizado a soportado en P3; ahora solo pickOut es no soportado.
-        // Verificamos que pickOut se detecta y clip ya NO genera diagnóstico (soportado P3).
+        // pick, pickOut: soportados en P2 (en knownMethods y recognizedBase).
+        // clip: soportado en P3 (en knownMethods).
+        // Ninguno debe generar diagnóstico.
         let code = """
-        note("c e g").pickOut(2).clip(0.5)
+        pick("<0 1>", [s("bd"), note("c e g").clip(0.5)])
         """
         let diags = CodeParser().validate(code)
         let tokens = diags.map { $0.token }
-        XCTAssertTrue(tokens.contains("pickOut"), "Debe detectar pickOut")
-        // clip ya está soportado (P3): no debe aparecer en diagnósticos
+        // Ninguna de estas funciones debe generar diagnósticos de unsupported
+        XCTAssertFalse(tokens.contains("pick"), "pick ya soportado (P2): no debe generar diagnóstico")
+        XCTAssertFalse(tokens.contains("pickOut"), "pickOut ya soportado (P2): no debe generar diagnóstico")
         XCTAssertFalse(tokens.contains("clip"), "clip ya soportado (P3): no debe generar diagnóstico")
-        // No duplicados del mismo token+línea
-        let pickOutCount = diags.filter { $0.token == "pickOut" && $0.line == 1 }.count
-        XCTAssertEqual(pickOutCount, 1, "pickOut en línea 1 no debe estar duplicado")
     }
 
-    // MARK: - 10. layer → unsupported con suggestion
-    // Nota: el argumento usa sintaxis JS (lambda), pero la detección de la función
-    // `layer` como no soportada se verifica con un argumento no-JS válido.
+    // MARK: - 10. layer → soportado desde P2 (sin diagnóstico)
 
     func testLayerUnsupported() {
-        // Usamos una invocación de layer sin lambda (para que arbitraryJS no enmascare
-        // el diagnóstico de unsupported en esa misma línea).
+        // layer fue marcado "no soportado" antes de P2. Ahora está implementado
+        // en knownMethods — no debe generar diagnóstico.
         let code = "s(\"bd\").layer(2)"
         let diags = CodeParser().validate(code)
         let layerDiags = diags.filter { $0.token == "layer" }
-        XCTAssertFalse(layerDiags.isEmpty, "layer debe ser detectado como no soportado")
-        XCTAssertNotNil(layerDiags.first?.suggestion, "layer debe tener sugerencia")
+        XCTAssertTrue(layerDiags.isEmpty,
+                      "layer ya está soportado (P2): no debe generar diagnóstico")
     }
 
     // MARK: - 11. Funciones P2 válidas no generan diagnósticos
