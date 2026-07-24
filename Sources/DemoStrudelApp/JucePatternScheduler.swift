@@ -98,6 +98,24 @@ final class JucePatternScheduler {
                 }
             }
         }
+
+        // P1 (Soundfonts GM): prefetch de instrumentos GM detectados en el patrón.
+        // Los nombres gm_ se excluyen del SampleBankManager; se manejan con SoundfontManager.
+        let gmPairs = previewHaps.compactMap { hap -> (name: String, index: Int)? in
+            let events = PatternEventExtractor.events(
+                haps: [hap], cycleSeconds: cycleSeconds, startHostTime: 0,
+                windowStart: -1e9, windowEnd: 1e9, defaultOrbit: Self.defaultOrbit)
+            for ev in events where !ev.isSynth && SoundfontManager.shared.isSoundfont(ev.sName) {
+                return (ev.sName, ev.variationIdx)
+            }
+            return nil
+        }
+        if !gmPairs.isEmpty {
+            let gmNames = Array(Set(gmPairs.map { $0.name }))
+            SoundfontManager.shared.prefetchAndWait(names: gmNames, timeout: 0.5)
+            // Cargar los buffers ya disponibles en JUCE (key por nota MIDI)
+            // Se hace también de forma lazy en scheduleWindow.
+        }
     }
 
     private func hostTimeNow() -> Double {
@@ -213,6 +231,43 @@ final class JucePatternScheduler {
                     lpenvOct:     ev.lpenv,
                     hpenvOct:     ev.hpenv,
                     postgain:     ev.postgain,
+                    orbit:        ev.orbit
+                )
+            } else if SoundfontManager.shared.isSoundfont(ev.sName) {
+                // P1 (Soundfonts GM): resolución de instrumento GM.
+                // SoundfontManager elige zona por keyRange y decodifica el MP3.
+                let midi = Int(ev.midiNote ?? 60)
+                guard let (sfBuf, sfRoot) = SoundfontManager.shared.resolve(name: ev.sName, midi: midi) else {
+                    continue  // no listo todavía → saltar evento
+                }
+                // Key única por (nombre, nota) para deduplicar cargas en JUCE.
+                let gmKey = "\(ev.sName):\(midi)"
+                if !loadedSamples.contains(gmKey) {
+                    engine.loadSample(key: gmKey, buffer: sfBuf)
+                    loadedSamples.insert(gmKey)
+                }
+                // Repitch: 2^((midi - rootMidi) / 12) × speed
+                let gmRate = pow(2.0, Double(midi - sfRoot) / 12.0) * (ev.speed ?? 1.0)
+                let hasADSR = ev.hasExplicitADSR
+                engine.scheduleSample(
+                    delaySeconds: delay,
+                    key:          gmKey,
+                    playbackRatio: gmRate,
+                    gain:         effectiveGain,
+                    postgain:     ev.postgain,
+                    beginFrac:    ev.begin ?? -1,
+                    endFrac:      ev.end   ?? -1,
+                    lpfHz:        ev.cutoff    ?? -1,
+                    hpfHz:        ev.hpf       ?? -1,
+                    resonanceQ:   ev.resonance ?? -1,
+                    pan:          ev.pan       ?? -1,
+                    crushBits:    ev.crush     ?? 0,
+                    hasADSR:      hasADSR,
+                    attack:       ev.attack  ?? ADSRDefaults.attack,
+                    decay:        ev.decay   ?? ADSRDefaults.decay,
+                    sustain:      ev.sustain ?? ADSRDefaults.sustain,
+                    release:      ev.release ?? ADSRDefaults.release,
+                    durationSec:  ev.durationSec,
                     orbit:        ev.orbit
                 )
             } else {

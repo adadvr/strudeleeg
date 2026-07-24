@@ -925,3 +925,89 @@ La UI (paneles Mini Engine / JUCE) muestra los diagnósticos como aviso legible 
 | `chord("Am")` | ✅ nativo | Acorde por nombre → stack de notas simultáneas (campo `note`). Fundamental en octava base 3. 18 calidades: mayor, `m`/`min`, `7`, `maj7`/`M7`, `m7`/`min7`, `dim`/`o`, `dim7`, `m7b5`/`ø`, `aug`/`+`, `sus2`, `sus4`/`sus`, `6`, `m6`, `9`, `maj9`, `m9`, `add9`. Símbolo inválido → silencio (no crashea). Mini-notación: `chord("<Am E Dm G>")` |
 | `.voicing()` | ✅ nativo | Re-dispone las notas del acorde cerca del registro ancla (default `c5`=72): pitch classes ascendentes colocadas en la octava más cercana. Determinista |
 | `.anchor("g5")` | ✅ nativo | Registro de referencia para el voicing (ej. `g5`=MIDI 79) |
+
+---
+
+## Soundfonts GM (v1.3 · P1)
+
+### Descripción
+
+Carga perezosa de los 128 instrumentos General MIDI Level 1 desde el servidor público
+webaudiofontdata de Felix Roos. No requiere hosting propio. Los archivos `.js` (~500 KB c/u)
+se descargan una sola vez y se cachean en disco.
+
+### API de uso
+
+```swift
+s("gm_electric_piano_1").note("c4 e4 g4")   // piano eléctrico en acorde C
+s("gm_violin").note("<c4 e4 g4>")            // violín con slowcat
+s("gm_flute").note("c5").fast(2)             // flauta rápida
+s("gm_epiano1")                              // alias corto (= gm_electric_piano_1, programa 4)
+s("gm_string_ensemble_1").note("g3").room(0.8)  // cuerdas con reverb
+```
+
+### Fuente de datos
+
+| Campo | Valor |
+|---|---|
+| URL base | `https://felixroos.github.io/webaudiofontdata/sound/` |
+| Formato | `{XXXX}_FluidR3_GM_sf2_file.js` donde `XXXX = String(format:"%04d", program*10)` |
+| Ejemplo programa 4 | `https://felixroos.github.io/webaudiofontdata/sound/0040_FluidR3_GM_sf2_file.js` |
+| Formato audio | Base64 de MP3 (campo `file:'...'` en cada zona) |
+| Pitch raíz | `originalPitch` en cents → rootMidi = originalPitch / 100 |
+| Rango de zona | `keyRangeLow..keyRangeHigh` (selección de zona por nota MIDI pedida) |
+
+### Mapa GM Level 1 (128 instrumentos + alias)
+
+Nombres con prefijo `gm_`, espacios reemplazados por `_`, sin caracteres especiales.
+
+Anclas verificadas en tests:
+
+| Nombre | Programa |
+|---|---|
+| `gm_acoustic_grand_piano` | 0 |
+| `gm_electric_piano_1` / `gm_epiano1` | 4 |
+| `gm_electric_piano_2` / `gm_epiano2` | 5 |
+| `gm_church_organ` | 19 |
+| `gm_acoustic_guitar_steel` | 25 |
+| `gm_violin` | 40 |
+| `gm_cello` | 42 |
+| `gm_pizzicato_strings` | 45 |
+| `gm_string_ensemble_1` | 48 |
+| `gm_trumpet` | 56 |
+| `gm_flute` | 73 |
+
+### Repitch
+
+```
+rate = 2^((midiPedido - rootMidi) / 12) × speed
+```
+
+- `rootMidi = originalPitch / 100` (zona elegida por keyRange).
+- Si ninguna zona cubre la nota pedida → se usa la zona cuyo centro está más cerca (fallback).
+- El repitch se aplica con `AVAudioUnitVarispeed` (backend AVAudio) o `playbackRatio` (backend JUCE).
+
+### Cache en disco
+
+- Directorio: `~/Library/Caches/DemoStrudel/soundfonts/`
+- Un archivo `sf_{program}.js` por instrumento.
+- Los buffers MP3 decodificados se mantienen en memoria (por programa + índice de zona).
+
+### Decisiones de integración (PatternScheduler)
+
+1. **Bypass de SampleBankManager**: los nombres `gm_` no se envían al prefetch remoto de `SampleBankManager` (evita conflictos de key y descarga innecesaria).
+2. **Inyección de buffer**: en `dispatchHap`, el buffer resuelto se inserta en `buffers["gm_xxx:0"]` antes de llamar a `buildGroups`. Esto permite que `AVAudioPlayerNode` tenga el buffer disponible sin modificar `preloadBuffers` (que busca URL local).
+3. **Grupo lazy**: el `LayerGroup` AVAudio se crea bajo demanda en el primer evento, igual que para samples normales. El player se pone a reproducir inmediatamente tras la construcción.
+4. **Skip sin crash**: si `resolve(name:midi:)` devuelve nil (instrumento aún descargando), el evento se salta sin producir error. Esto es idéntico al comportamiento de `SampleBankManager` para buffers no listos.
+5. **JUCE**: key única `"gm_xxx:midi"` por nota, para cargar una sola vez por (instrumento, nota). El repitch queda en `playbackRatio` respecto a `rootMidi`.
+
+### Limitaciones documentadas
+
+| Limitación | Notas |
+|---|---|
+| Decodificación lazy del MP3 | La primera vez que se pide una zona (tras tener el .js en caché), se decodifica async. Puede saltar uno o pocos eventos hasta que el buffer queda listo (segundos en el primer lanzamiento, milisegundos en relanzamientos). |
+| Primer ciclo sin sonido (primera descarga) | El .js tarda ~1-3s en descargarse si no está en caché. `prefetchAndWait` espera hasta 0.5s (acotado para no bloquear el motor). |
+| No soporta "sample" field directo de webaudiofont (`loopStart`/`loopEnd`) | El looping de zonas (campo `loopStart`/`loopEnd`) no está implementado: se reproduce el sample completo sin loop. Sustains largos pueden sonar cortados en notas mantenidas (piano con hold, cuerdas). Documentado: la implementación de loop requiere un render block personalizado o AVAudioPlayerNodeBufferOptions.loops — fuera del alcance de P1. |
+| Velocidad no afecta tímbrica | `gain` y `velocity` afectan la amplitud pero no la selección de zona (algunos soundfonts tienen capas de velocity). |
+
+**Limitación conocida (P1):** dentro de un mismo instrumento GM, las zonas pueden tener distinto sample-rate. El `AVAudioPlayerNode` fija su formato con la primera zona cargada; si una nota posterior cae en una zona de otro sample-rate, ese evento puede saltarse. Cubre bien la mayoría de instrumentos; se resolverá resampleando las zonas a un formato común si aparece un caso problemático.

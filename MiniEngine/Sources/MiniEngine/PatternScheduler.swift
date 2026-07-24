@@ -287,7 +287,13 @@ public final class PatternScheduler {
             } else {
                 samplePairs.insert(pair)
                 sampleNames.insert(sName)
-                remoteNames.append((name: sName, index: nIdx))
+                // P1 (Soundfonts GM): los nombres gm_ van al SoundfontManager,
+                // NO al SampleBankManager (evitar conflictos de key).
+                if SoundfontManager.shared.isSoundfont(sName) {
+                    // prefetch se dispara abajo, fuera del loop
+                } else {
+                    remoteNames.append((name: sName, index: nIdx))
+                }
             }
         }
 
@@ -296,6 +302,12 @@ public final class PatternScheduler {
         // eventos se saltan hasta que llegan (timeout corto: nunca bloquea).
         if let bm = bankManager {
             bm.prefetchAndWait(names: remoteNames, timeout: 0.5)
+        }
+
+        // P1 (Soundfonts GM): prefetch de instrumentos GM detectados en el patrón.
+        let gmNames = sampleNames.filter { SoundfontManager.shared.isSoundfont($0) }
+        if !gmNames.isEmpty {
+            SoundfontManager.shared.prefetchAndWait(names: Array(gmNames), timeout: 0.5)
         }
 
         // Build orbit buses first (before groups/layers so connections work)
@@ -539,6 +551,47 @@ public final class PatternScheduler {
     ) {
         // Bug 1 fix: chain key is layer-qualified; buffers are keyed by plain name.
         let chainKey = PatternScheduler.layerKey(layerIdx: layerIdx, name: sampleName)
+
+        // P1 (Soundfonts GM): ruta gm_ — bypass completo del SampleBankManager.
+        // SoundfontManager.resolve() elige la zona por keyRange y decodifica el MP3.
+        // Si el instrumento no está listo aún devuelve nil → saltamos el evento.
+        if SoundfontManager.shared.isSoundfont(sampleName) {
+            let midi = midiNote ?? 60
+            guard let (sfBuf, sfRoot) = SoundfontManager.shared.resolve(name: sampleName, midi: midi) else {
+                // No listo todavía (descarga en vuelo) — saltar sin crashear
+                return
+            }
+            // Inyectar el buffer en el dict local para que buildGroups lo encuentre
+            // en preloadBuffers (que busca "name:0"). Re-inyección es barata (puntero).
+            let bufKey = "\(sampleName):0"
+            if buffers[bufKey] == nil { buffers[bufKey] = sfBuf }
+
+            // Crear el LayerGroup si hace falta
+            if groups[chainKey] == nil {
+                buildGroups(for: [LayerNamePair(layerIdx: layerIdx, name: sampleName)])
+                if let g = groups[chainKey], !g.player.isPlaying { g.player.play() }
+            }
+            guard let group = groups[chainKey],
+                  let avTime = avAudioTime(forHostSeconds: absoluteTime) else { return }
+
+            // Repitch: 2^((midi - rootMidi) / 12) × speed
+            let noteRate = pow(2.0, Double(midi - sfRoot) / 12.0)
+            let rate = Float(noteRate * (speed ?? 1.0))
+            group.player.volume  = Float(gain * postgain)
+            if let p = pan { group.panner.pan = Float(p * 2.0 - 1.0) }
+            if let d = distort { group.distortion.wetDryMix = Float(d * 100) }
+            else if let s = shape { group.distortion.wetDryMix = Float(s * 100) }
+            if let v = vowel { applyVowelToEQ(group.vowelEQ, vowel: v) }
+            // Biquads de filtro per-evento (misma lógica que muestras normales)
+            var sfSchedule = sfBuf
+            let q = resonance ?? 0.707
+            if let fc = cutoff  { sfSchedule = lpfBuffer(sfSchedule, cutoffHz: fc, q: q) }
+            if let fc = hpf     { sfSchedule = hpfBufferApply(sfSchedule, cutoffHz: fc, q: q) }
+            if let bits = crush { sfSchedule = bitcrushedBuffer(sfSchedule, bits: bits) }
+            group.varispeed.rate = rate
+            group.player.scheduleBuffer(sfSchedule, at: avTime, options: [], completionHandler: nil)
+            return
+        }
 
         // Lazily create a group for this (layer, sample) pair if needed
         if groups[chainKey] == nil {
