@@ -24,8 +24,19 @@ struct ContentView: View {
     @State private var rightCode = seedCode
     @State private var juceCode  = seedCode
 
+    // Estado de presets
+    @State private var presets: [SongPreset] = PresetStore.all()
+    @State private var selectedPresetID: String? = nil
+    @State private var newTemplateName: String = ""
+    @State private var guardadoVisible: Bool = false
+
     var body: some View {
         VStack(spacing: 0) {
+            // ── Barra de presets ─────────────────────────────────────────
+            presetBar
+
+            Divider()
+
             // ── Three panels: Strudel · Mini Engine · JUCE ──────────────
             HSplitView {
                 leftPanel
@@ -36,9 +47,29 @@ struct ContentView: View {
 
             Divider()
 
-            // ── Shared stop button ───────────────────────────────────────
-            HStack {
+            // ── Barra inferior: Stop + timer ─────────────────────────────
+            HStack(spacing: 20) {
                 Spacer()
+
+                // Timer de audio — visible solo cuando hay reproducción activa
+                if vm.lastPlayedSide != .none {
+                    HStack(spacing: 6) {
+                        Image(systemName: "timer")
+                            .foregroundColor(.secondary)
+                        Text(vm.elapsedString)
+                            .font(.system(.title3, design: .monospaced))
+                            .foregroundColor(.primary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    )
+                }
+
                 Button {
                     vm.stopAll()
                 } label: {
@@ -52,12 +83,78 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(".", modifiers: [.command])
+
                 Spacer()
             }
             .padding(.vertical, 16)
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .frame(minWidth: 1400, minHeight: 600)
+    }
+
+    // ── Barra de presets — selector + guardar template ───────────────────
+    private var presetBar: some View {
+        HStack(spacing: 12) {
+            Label("Presets", systemImage: "music.note.list")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            Picker("Template", selection: $selectedPresetID) {
+                Text("— elegir —").tag(String?.none)
+                ForEach(presets) { preset in
+                    Text(preset.name).tag(String?.some(preset.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(minWidth: 240)
+            .onChange(of: selectedPresetID) { _, newID in
+                // Al seleccionar, cargamos el código en los tres editores
+                guard let id = newID,
+                      let preset = presets.first(where: { $0.id == id }) else { return }
+                leftCode  = preset.code
+                rightCode = preset.code
+                juceCode  = preset.code
+            }
+
+            Divider()
+                .frame(height: 20)
+
+            // Campo y botón para guardar template de usuario
+            TextField("Nombre del template", text: $newTemplateName)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 180, maxWidth: 260)
+
+            Button {
+                guard !newTemplateName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                if let saved = try? PresetStore.save(name: newTemplateName, code: leftCode) {
+                    presets = PresetStore.all()
+                    selectedPresetID = saved.id
+                    newTemplateName = ""
+                    // Mostrar confirmación temporal
+                    guardadoVisible = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        guardadoVisible = false
+                    }
+                }
+            } label: {
+                Label("Guardar template", systemImage: "square.and.arrow.down")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .disabled(newTemplateName.trimmingCharacters(in: .whitespaces).isEmpty)
+
+            // Confirmación temporal de guardado
+            if guardadoVisible {
+                Text("Guardado ✓")
+                    .font(.caption)
+                    .foregroundColor(.green)
+                    .transition(.opacity)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     // ── Left panel — Motor A (Strudel / WebView) ─────────────────────────
@@ -258,6 +355,44 @@ final class DemoViewModel: ObservableObject {
     @Published var strudelError: String = ""
     @Published var lastPlayedSide: PlaySide = .none
 
+    // ── Timer de audio ───────────────────────────────────────────────────
+    @Published var elapsed: TimeInterval = 0
+    private var audioTimer: Timer?
+    private var playStartDate: Date?
+
+    /// Cadena formateada "m:ss.d" para mostrar en la UI (ej. "1:23.4").
+    var elapsedString: String {
+        let total = elapsed
+        let minutes = Int(total) / 60
+        let seconds = Int(total) % 60
+        let tenths  = Int((total * 10).truncatingRemainder(dividingBy: 10))
+        return String(format: "%d:%02d.%d", minutes, seconds, tenths)
+    }
+
+    /// Arranca (o reinicia) el timer de posición de reproducción.
+    private func startTimer() {
+        audioTimer?.invalidate()
+        playStartDate = Date()
+        elapsed = 0
+        // Capturamos la fecha de inicio como valor local para evitar
+        // acceder a la propiedad aislada en @MainActor desde un closure Sendable.
+        let startDate = playStartDate!
+        audioTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            let now = Date().timeIntervalSince(startDate)
+            Task { @MainActor [weak self] in
+                self?.elapsed = now
+            }
+        }
+    }
+
+    /// Detiene el timer y resetea el contador.
+    private func stopTimer() {
+        audioTimer?.invalidate()
+        audioTimer = nil
+        playStartDate = nil
+        elapsed = 0
+    }
+
     private let nativeEngine: NativeEngineAdapter
     private let strudelEngine: StrudelWebEngine
     private let juceEngine: JuceEngine
@@ -315,6 +450,7 @@ final class DemoViewModel: ObservableObject {
         strudelError = ""
         statusMessage = "Iniciando Strudel…"
         strudelEngine.play(code: code)
+        startTimer()
     }
 
     func playNative(code: String) {
@@ -332,6 +468,7 @@ final class DemoViewModel: ObservableObject {
         }
 
         nativeEngine.play(code: code)
+        startTimer()
     }
 
     /// Fase 2: JUCE reproduce voces de synth reales del patrón (samples/FX en
@@ -351,6 +488,7 @@ final class DemoViewModel: ObservableObject {
         }
 
         juceScheduler.play(code: code)
+        startTimer()
     }
 
     /// Formatea una lista de diagnósticos en texto legible multi-línea (en español).
@@ -376,6 +514,7 @@ final class DemoViewModel: ObservableObject {
         nativeEngine.stop()
         strudelEngine.stop()
         juceScheduler.stop()
+        stopTimer()
         statusMessage = ""
         strudelError = ""
         parseError = ""
